@@ -16,6 +16,7 @@ import (
 	messageservice "github.com/daoquocdai/chat-api/internal/module/message/service"
 	threadhandler "github.com/daoquocdai/chat-api/internal/module/thread/handler"
 	"github.com/daoquocdai/chat-api/internal/module/thread/membership"
+	threadpublisher "github.com/daoquocdai/chat-api/internal/module/thread/publisher"
 	threadrepository "github.com/daoquocdai/chat-api/internal/module/thread/repository"
 	threadservice "github.com/daoquocdai/chat-api/internal/module/thread/service"
 	userhandler "github.com/daoquocdai/chat-api/internal/module/user/handler"
@@ -94,7 +95,7 @@ func run() error {
 	messageHandler := messagehandler.New(messageService)
 
 	threadRepository := threadrepository.New(pool)
-	threadService := threadservice.New(threadRepository, userService, messageService)
+	threadService := threadservice.New(threadRepository, userService, messageService, threadpublisher.NewRedis(redisClient, cfg.Redis.Stream), cfg.Redis.PublishTimeout)
 	threadHandler := threadhandler.New(threadService)
 
 	wsTicketService := wsticket.NewService(wsticket.NewRedisRepository(redisClient), cfg.WSTicketTTL)

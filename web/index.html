@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Mini-Hermes</title>
-  <link rel="stylesheet" href="/style.css?v=20261010-ui">
+  <link rel="stylesheet" href="/style.css?v=20261011-read-users">
 </head>
 <body>
   <main class="app">
@@ -59,6 +59,7 @@
         <section class="conversation-section" aria-labelledby="direct-heading">
           <h2 id="direct-heading">Chat 1-1</h2>
           <div id="direct-thread-list" class="peer-list"></div>
+          <button id="refresh-users-button" class="secondary refresh-users" type="button">Làm mới danh sách</button>
           <div id="new-direct-section">
             <h3>Mở chat mới</h3>
             <div id="peer-list" class="peer-list"></div>
@@ -113,7 +114,7 @@
         <form id="message-form" class="message-form">
           <label for="content">Tin nhắn</label>
           <div class="row">
-            <input id="content" name="content" autocomplete="off" maxlength="1000" required disabled>
+            <input id="content" name="content" autocomplete="off" required disabled>
             <button id="send-button" type="submit" disabled>Gửi</button>
           </div>
         </form>
@@ -126,6 +127,6 @@
   <script src="/e2ee-state.js?v=20261009-v2" defer></script>
   <script src="/e2ee.js?v=20261009-v2" defer></script>
   <script src="/realtime-core.js?v=20261009-v2" defer></script>
-  <script src="/app.js?v=20261010-ui" defer></script>
+  <script src="/app.js?v=20261011-read-users" defer></script>
 </body>
 </html>

@@ -6,8 +6,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	messagemodel "github.com/daoquocdai/chat-api/internal/module/message/model"
+	threadevent "github.com/daoquocdai/chat-api/internal/module/thread/event"
 	threadmodel "github.com/daoquocdai/chat-api/internal/module/thread/model"
 	"github.com/daoquocdai/chat-api/internal/module/thread/service"
 	usermodel "github.com/daoquocdai/chat-api/internal/module/user/model"
@@ -22,7 +24,7 @@ const (
 type fakeThreadRepository struct {
 	createOrGet  func(context.Context, int64, int64) (threadmodel.Thread, bool, error)
 	list         func(context.Context, int64) ([]threadmodel.Thread, error)
-	markRead     func(context.Context, string, int64, int64) (int64, error)
+	markRead     func(context.Context, string, int64, int64) (threadmodel.ReadResult, error)
 	createGroup  func(context.Context, int64, string, []int64, string) (threadmodel.Thread, messagemodel.Message, error)
 	changeMember func(context.Context, string, int64, int64, threadmodel.MembershipAction, string) (messagemodel.Message, error)
 	members      func(context.Context, string, int64) ([]threadmodel.Member, error)
@@ -46,7 +48,7 @@ func (r *fakeThreadRepository) MarkRead(
 	ctx context.Context,
 	threadID string,
 	userID, lastReadSeq int64,
-) (int64, error) {
+) (threadmodel.ReadResult, error) {
 	r.calls++
 	return r.markRead(ctx, threadID, userID, lastReadSeq)
 }
@@ -126,7 +128,7 @@ func TestCreateOrGetDirect(t *testing.T) {
 				return wantThread, true, tt.repositoryError
 			}}
 
-			got, created, err := service.New(repository, users, &fakeGroupPublisher{}).CreateOrGetDirect(
+			got, created, err := service.New(repository, users, &fakeGroupPublisher{}, nil, time.Second).CreateOrGetDirect(
 				ctx,
 				actorExternalID,
 				tt.peerID,
@@ -173,14 +175,14 @@ func TestMarkRead(t *testing.T) {
 				gotCtx context.Context,
 				threadID string,
 				userID, lastReadSeq int64,
-			) (int64, error) {
+			) (threadmodel.ReadResult, error) {
 				if gotCtx != ctx || threadID != threadExternalID || userID != 11 || lastReadSeq != tt.lastReadSeq {
 					t.Fatalf("unexpected MarkRead arguments: %q %d %d", threadID, userID, lastReadSeq)
 				}
-				return tt.want, tt.repositoryErr
+				return threadmodel.ReadResult{LastReadSeq: tt.want, ThreadExternalID: threadExternalID}, tt.repositoryErr
 			}}
 
-			got, err := service.New(repository, users, &fakeGroupPublisher{}).MarkRead(ctx, actorExternalID, tt.threadID, tt.lastReadSeq)
+			got, err := service.New(repository, users, &fakeGroupPublisher{}, nil, time.Second).MarkRead(ctx, actorExternalID, tt.threadID, tt.lastReadSeq)
 			if !errors.Is(err, tt.wantError) || got != tt.want {
 				t.Fatalf("result = (%d, %v), want (%d, %v)", got, err, tt.want, tt.wantError)
 			}
@@ -274,7 +276,7 @@ func TestCreateGroup(t *testing.T) {
 					t.Fatalf("event = %+v", event)
 				}
 			}
-			got, err := service.New(repo, users, publisher).CreateGroup(context.Background(), actorExternalID, tc.groupName, tc.ids)
+			got, err := service.New(repo, users, publisher, nil, time.Second).CreateGroup(context.Background(), actorExternalID, tc.groupName, tc.ids)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("error = %v, want %v", err, tc.wantErr)
 			}
@@ -326,7 +328,7 @@ func TestGroupMembership(t *testing.T) {
 				return saved, tc.repoErr
 			}}
 			pub := &fakeGroupPublisher{err: tc.publishErr}
-			svc := service.New(repo, users, pub)
+			svc := service.New(repo, users, pub, nil, time.Second)
 			var got messagemodel.Message
 			var err error
 			switch tc.action {
@@ -365,8 +367,116 @@ func TestGroupMembers(t *testing.T) {
 		}
 		return nil, nil
 	}}
-	got, err := service.New(repo, users, &fakeGroupPublisher{}).Members(context.Background(), actorExternalID, threadExternalID)
+	got, err := service.New(repo, users, &fakeGroupPublisher{}, nil, time.Second).Members(context.Background(), actorExternalID, threadExternalID)
 	if err != nil || got == nil || len(got) != 0 {
 		t.Fatalf("members=%v error=%v", got, err)
+	}
+}
+
+type fakeReadNotifier struct {
+	events    []threadevent.ThreadUpdated
+	err       error
+	onPublish func(context.Context, threadevent.ThreadUpdated)
+}
+
+func (n *fakeReadNotifier) Publish(ctx context.Context, event threadevent.ThreadUpdated) error {
+	n.events = append(n.events, event)
+	if n.onPublish != nil {
+		n.onPublish(ctx, event)
+	}
+	return n.err
+}
+
+func TestMarkReadNotifications(t *testing.T) {
+	dbErr := errors.New("commit failed")
+	for _, tc := range []struct {
+		name         string
+		peerID       string
+		repoErr      error
+		userErr      error
+		publishErr   error
+		cancelAtSave bool
+		wantIDs      []string
+	}{
+		{name: "direct reaches reader and peer", peerID: peerExternalID, wantIDs: []string{actorExternalID, peerExternalID}},
+		{name: "group reaches reader only", wantIDs: []string{actorExternalID}},
+		{name: "duplicate recipient omitted", peerID: actorExternalID, wantIDs: []string{actorExternalID}},
+		{name: "transaction failure does not publish", peerID: peerExternalID, repoErr: dbErr},
+		{name: "outsider does not publish", repoErr: threadmodel.ErrNotParticipant},
+		{name: "invalid sequence does not publish", repoErr: threadmodel.ErrInvalidReadSequence},
+		{name: "actor lookup failure does not publish", userErr: usermodel.ErrUserNotFound},
+		{name: "publish failure preserves committed marker", publishErr: errors.New("Redis unavailable"), wantIDs: []string{actorExternalID}},
+		{name: "request cancellation after commit still publishes", cancelAtSave: true, wantIDs: []string{actorExternalID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type contextKey struct{}
+			ctx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "request value"))
+			defer cancel()
+			users := &fakeUserFinder{get: func(context.Context, string) (usermodel.User, error) {
+				return usermodel.User{ID: 11, ExternalID: actorExternalID}, tc.userErr
+			}}
+			order := []string{}
+			repo := &fakeThreadRepository{markRead: func(gotCtx context.Context, id string, userID, seq int64) (threadmodel.ReadResult, error) {
+				order = append(order, "repository")
+				if gotCtx != ctx || id != threadExternalID || userID != 11 || seq != 3 {
+					t.Fatal("incorrect read arguments")
+				}
+				if tc.cancelAtSave {
+					cancel()
+				}
+				// A retry may return an already advanced committed marker.
+				return threadmodel.ReadResult{LastReadSeq: 7, ThreadExternalID: threadExternalID, PeerExternalID: tc.peerID}, tc.repoErr
+			}}
+			notifier := &fakeReadNotifier{err: tc.publishErr, onPublish: func(gotCtx context.Context, event threadevent.ThreadUpdated) {
+				order = append(order, "notifier")
+				if gotCtx.Err() != nil || gotCtx.Value(contextKey{}) != "request value" {
+					t.Fatal("notification lost request values or inherited cancellation")
+				}
+				deadline, ok := gotCtx.Deadline()
+				if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > time.Second {
+					t.Fatal("notification does not use configured timeout")
+				}
+			}}
+			got, err := service.New(repo, users, &fakeGroupPublisher{}, notifier, time.Second).MarkRead(ctx, actorExternalID, " "+threadExternalID+" ", 3)
+			wantErr := tc.repoErr
+			if tc.userErr != nil {
+				wantErr = tc.userErr
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("error = %v, want %v", err, wantErr)
+			}
+			if wantErr != nil {
+				if got != 0 || len(notifier.events) != 0 {
+					t.Fatal("unsaved marker returned or notified")
+				}
+				return
+			}
+			if got != 7 || len(notifier.events) != 1 || strings.Join(order, ",") != "repository,notifier" {
+				t.Fatalf("marker/events/order = %d/%v/%v", got, notifier.events, order)
+			}
+			want := threadevent.ThreadUpdated{ThreadID: threadExternalID, RecipientIDs: tc.wantIDs}
+			if !reflect.DeepEqual(notifier.events[0], want) {
+				t.Fatalf("event = %+v, want %+v", notifier.events[0], want)
+			}
+		})
+	}
+}
+
+func TestMarkReadNotificationTimeout(t *testing.T) {
+	users := &fakeUserFinder{get: func(context.Context, string) (usermodel.User, error) {
+		return usermodel.User{ID: 11, ExternalID: actorExternalID}, nil
+	}}
+	repo := &fakeThreadRepository{markRead: func(context.Context, string, int64, int64) (threadmodel.ReadResult, error) {
+		return threadmodel.ReadResult{LastReadSeq: 5, ThreadExternalID: threadExternalID}, nil
+	}}
+	notifier := &fakeReadNotifier{onPublish: func(ctx context.Context, _ threadevent.ThreadUpdated) {
+		<-ctx.Done()
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatal("notification was not bounded by timeout")
+		}
+	}, err: context.DeadlineExceeded}
+	got, err := service.New(repo, users, &fakeGroupPublisher{}, notifier, 10*time.Millisecond).MarkRead(context.Background(), actorExternalID, threadExternalID, 5)
+	if err != nil || got != 5 {
+		t.Fatalf("committed marker = %d, error = %v", got, err)
 	}
 }

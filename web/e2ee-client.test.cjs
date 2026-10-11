@@ -31,6 +31,97 @@ const toB = (id = T) => ({ id, kind: "direct", peer: { id: B, username: "bob" } 
 const toA = (id = T) => ({ id, kind: "direct", peer: { id: A, username: "alice" } });
 const clone = (value) => structuredClone(value);
 
+function browserFixture(fetchAPI, cache = new Map()) {
+  const vm = require("node:vm");
+  function element(tag = "div") {
+    return { tag, hidden: false, disabled: false, value: "", checked: false, textContent: "", dataset: {},
+      children: [], events: {}, scrollHeight: 100, scrollTop: 0, clientHeight: 100, elements: {},
+      classList: { add() {} }, get options() { return this.children.filter((child) => child.tag === "option"); },
+      addEventListener(name, listener) { this.events[name] = listener; },
+      append(...items) { this.children.push(...items); if (this.tag === "select" && !this.value) this.value = this.options[0]?.value || ""; },
+      replaceChildren(...items) { this.children = []; if (this.tag === "select") this.value = ""; this.append(...items); },
+      reset() { for (const item of Object.values(this.elements)) item.value = ""; },
+      focus() {}, setAttribute() {}, removeAttribute(name) { if (name === "maxlength") this.maxLength = -1; },
+      querySelectorAll(selector) {
+        const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll("*")]);
+        return selector === "input:checked" ? descendants.filter((child) => child.tag === "input" && child.checked) : descendants;
+      },
+      querySelector(selector) { return selector === ".message:last-child"
+        ? this.children.filter((item) => item.dataset?.seq).at(-1) : null; },
+      getBoundingClientRect() { return { top: 0, bottom: 100, left: 0, right: 100 }; } };
+  }
+  const nodes = new Map([...fs.readFileSync(path.join(__dirname, "index.html"), "utf8")
+    .matchAll(/<([a-z][a-z0-9]*)\b[^>]*\bid="([^"]+)"/g)].map((match) => [match[2], element(match[1])]));
+  for (const name of ["register", "login"]) nodes.get(name + "-form").elements = {
+    username: nodes.get(name + "-username"), password: nodes.get(name + "-password") };
+  nodes.get("group-form").elements = { name: nodes.get("group-name") };
+  class Socket { static OPEN = 1; readyState = 0; close() { this.readyState = 3; this.onclose?.(); } }
+  const timers = new Map(), windowEvents = {}, documentEvents = {};
+  let timerID = 0, now = 0;
+  const context = vm.createContext({ console, crypto, WebAssembly, isSecureContext: true,
+    MiniHermesWASM, MiniHermesE2EEStorage, Headers, AbortController, AbortSignal, URL, URLSearchParams,
+    atob, btoa, structuredClone, WebSocket: Socket, innerWidth: 100, innerHeight: 100,
+    location: { origin: "https://chat.test" }, fetch: fetchAPI,
+    setTimeout(callback, delay) { timers.set(++timerID, { callback, due: now + delay }); return timerID; },
+    clearTimeout(id) { timers.delete(id); }, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+    sessionStorage: { getItem: (key) => cache.get(key) ?? null, setItem: (key, value) => cache.set(key, value),
+      removeItem: (key) => cache.delete(key) },
+    window: { addEventListener(name, listener) { windowEvents[name] = listener; }, innerWidth: 100, innerHeight: 100 },
+    document: { visibilityState: "visible", querySelector: (selector) => nodes.get(selector.slice(1)) || null,
+      createElement: element, addEventListener(name, listener) { documentEvents[name] = listener; } } });
+  for (const file of ["e2ee.js", "realtime-core.js", "app.js"]) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, file), "utf8"), context, { filename: file });
+  }
+  return { context, nodes, cache, timers, windowEvents, documentEvents,
+    run: (code) => vm.runInContext(code, context),
+    async advance(milliseconds) {
+      const target = now + milliseconds;
+      while (true) {
+        const next = [...timers].filter(([, timer]) => timer.due <= target).sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next) break;
+        now = next[1].due; timers.delete(next[0]); next[1].callback();
+        await new Promise(setImmediate);
+      }
+      now = target;
+      await new Promise(setImmediate);
+    } };
+}
+
+function apiResponse(body, status = 200) {
+  return { ok: status >= 200 && status < 300, status, json: async () => clone(body) };
+}
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+function frontendFixture(handler) {
+  const calls = [];
+  const ui = browserFixture(async (url, options = {}) => {
+    const call = { url, method: options.method || "GET", raw: options.body,
+      body: options.body ? JSON.parse(options.body) : null };
+    calls.push(call);
+    return handler(call);
+  });
+  ui.context.fixtureUsers = [{ id: A, username: "alice" }, { id: B, username: "bob" }];
+  ui.context.fixtureThread = { id: T, kind: "group", name: "Fixture group", role: "admin", member_count: 2,
+    joined_seq: 1, last_seq: 0, last_read_seq: 0, unread_count: 0 };
+  ui.run(`state.token = "fixture-token"; state.currentUserID = fixtureUsers[0].id;
+    state.currentUsername = fixtureUsers[0].username; state.users = fixtureUsers;
+    state.e2ee = { canRead: () => true, canSend: () => true,
+      snapshot: () => ({ status: "ready", pending: [] }), close: async () => {} };
+    state.currentCache = reconcileThreadSummary(fixtureThread); state.threadID = fixtureThread.id;
+    state.currentCache.messagesLoaded = true; renderThreadHeading(); renderPeerList();`);
+  return { ...ui, calls, submit: () => ui.nodes.get("message-form").events.submit({ preventDefault() {} }),
+    refresh: () => ui.nodes.get("refresh-users-button").events.click(),
+    socketEvent(event) { ui.context.fixtureEvent = JSON.stringify(event); ui.run("handleSocketMessage(fixtureEvent)"); } };
+}
+
+function sentMessage(call, seq = 1) {
+  return { id: call.body.message_id, thread_id: T, sender_id: A, seq, kind: "text", content_format: "plaintext",
+    content: call.body.content, created_at: "2026-10-11T00:00:00Z" };
+}
+
 async function proposeSession(client, thread) {
   const context = { thread_id: thread.id, epoch_id: crypto.randomUUID(),
     sender_id: client.userID, recipient_id: thread.peer.id };
@@ -200,7 +291,6 @@ test("fixed multi-device sessions, concurrent initialization, password recovery 
 });
 
 test("UI registration/login never send password, reload recovers the vault, groups remain plaintext", { timeout: 300000 }, async () => {
-  const vm = require("node:vm");
   const password = "One password for ui account!";
   const userID = crypto.randomUUID();
   const groupID = crypto.randomUUID();
@@ -243,36 +333,7 @@ test("UI registration/login never send password, reload recovers the vault, grou
     throw new Error("Unexpected UI request: " + url);
   }
   function browser(cache = new Map()) {
-    function element() {
-      return { hidden: false, disabled: false, value: "", textContent: "", dataset: {}, children: [], options: [], events: {},
-        scrollHeight: 100, scrollTop: 0, clientHeight: 100, elements: {}, classList: { add() {} },
-        addEventListener(name, listener) { this.events[name] = listener; }, append(...items) { this.children.push(...items); },
-        replaceChildren(...items) { this.children = items; }, reset() {
-          for (const item of Object.values(this.elements)) item.value = "";
-        }, focus() {}, setAttribute() {}, querySelectorAll() { return []; },
-        querySelector(selector) { return selector === ".message:last-child" ?
-          this.children.filter((item) => item.dataset?.seq).at(-1) : null; },
-        getBoundingClientRect() { return { top: 0, bottom: 100, left: 0, right: 100 }; } };
-    }
-    const nodes = new Map([...fs.readFileSync(path.join(__dirname, "index.html"), "utf8").matchAll(/\bid="([^"]+)"/g)]
-      .map((match) => [match[1], element()]));
-    for (const name of ["register", "login"]) nodes.get(name + "-form").elements = {
-      username: nodes.get(name + "-username"), password: nodes.get(name + "-password") };
-    class Socket { static OPEN = 1; readyState = 0; close() { this.readyState = 3; this.onclose?.(); } }
-    const context = vm.createContext({ console, crypto, WebAssembly, isSecureContext: true,
-      MiniHermesWASM, MiniHermesE2EEStorage, Headers, AbortController, AbortSignal, URL, URLSearchParams,
-      atob, btoa, structuredClone, WebSocket: Socket, innerWidth: 100, innerHeight: 100,
-      location: { origin: "https://chat.test" }, fetch: fetchAPI,
-      setTimeout: () => 1, clearTimeout() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
-      sessionStorage: { getItem: (key) => cache.get(key) ?? null, setItem: (key, value) => cache.set(key, value),
-        removeItem: (key) => cache.delete(key) },
-      window: { addEventListener() {}, innerWidth: 100, innerHeight: 100 },
-      document: { visibilityState: "visible", querySelector: (selector) => nodes.get(selector.slice(1)) || null,
-        createElement: element, addEventListener() {} } });
-    for (const file of ["e2ee.js", "realtime-core.js", "app.js"]) {
-      vm.runInContext(fs.readFileSync(path.join(__dirname, file), "utf8"), context, { filename: file });
-    }
-    return { context, nodes, cache, run: (code) => vm.runInContext(code, context) };
+    return browserFixture(fetchAPI, cache);
   }
   const first = browser();
   first.nodes.get("register-username").value = " Ui_User ";
@@ -314,6 +375,316 @@ test("UI registration/login never send password, reload recovers the vault, grou
   assert.equal(JSON.stringify(logs).includes(first.run("state.vaultKey")), false);
   assert.equal(first.run("state.currentCache.messages.get(1).content"), "group stays plaintext");
   for (const instance of [first, reload, fresh]) instance.nodes.get("logout-button").events.click();
+});
+
+test("group validation precedes UUID/pending and uses Go whitespace and Unicode code points", async () => {
+  const ui = frontendFixture((call) => apiResponse(sentMessage(call)));
+  let generated = 0;
+  ui.context.crypto = { randomUUID() { generated += 1; return crypto.randomUUID(); } };
+  for (const content of ["", "  \t\r\n  ", "\u0085\u00a0\u3000", "hello\0world", "🙂".repeat(1001)]) {
+    ui.nodes.get("content").value = content;
+    await ui.submit();
+    assert.equal(ui.run("state.currentCache.pendingSend"), null);
+    assert.equal(ui.calls.length, 0);
+    assert.equal(generated, 0, "invalid content must not allocate a request UUID");
+    assert.equal(ui.nodes.get("content").value, content);
+    assert.equal(ui.nodes.get("send-button").textContent, "Gửi");
+    assert.doesNotMatch(ui.nodes.get("error").textContent, /Gửi lại/);
+  }
+  const content = "\u0085 " + "🙂".repeat(1000) + " \u3000";
+  ui.nodes.get("content").value = content;
+  ui.nodes.get("content").events.input();
+  assert.equal(ui.nodes.get("error").textContent, "");
+  await ui.submit();
+  assert.equal(generated, 1);
+  assert.equal(ui.calls[0].body.content, content, "validation must preserve the original send body");
+  assert.equal(ui.nodes.get("content").maxLength, -1, "HTML UTF-16 maxlength must not truncate 1000 astral points");
+  assert.equal(ui.run('validGroupContent("\\ufeff")'), true, "Go TrimSpace preserves U+FEFF");
+});
+
+test("definite 400/413 rejection releases pending, preserves edited draft, and permits a new UUID", async () => {
+  for (const status of [400, 413]) {
+    const first = deferred();
+    const ui = frontendFixture((call) => ui.calls.length === 1 ? first.promise : apiResponse(sentMessage(call)));
+    ui.nodes.get("content").value = "first body";
+    const sending = ui.submit();
+    const pending = ui.run("state.currentCache.pendingSend");
+    ui.nodes.get("content").value = "edited while waiting";
+    ui.nodes.get("content").events.input();
+    first.resolve(apiResponse({ error: "invalid content" }, status));
+    await sending;
+    assert.equal(ui.run("state.currentCache.pendingSend"), null);
+    assert.equal(ui.nodes.get("content").value, "edited while waiting");
+    assert.equal(ui.run("state.currentCache.draftContent"), "edited while waiting");
+    assert.equal(ui.nodes.get("send-button").textContent, "Gửi");
+    assert.equal(ui.nodes.get("send-button").disabled, false);
+    assert.doesNotMatch(ui.nodes.get("error").textContent, /Gửi lại|nội dung cũ|chưa được xác nhận/);
+    await ui.submit();
+    assert.equal(ui.calls.length, 2, "definite rejection must not automatically retry");
+    assert.notEqual(ui.calls[1].body.message_id, pending.messageID);
+    assert.equal(ui.calls[1].body.content, "edited while waiting");
+    assert.equal(ui.run("state.currentCache.pendingSend"), null);
+  }
+});
+
+test("network errors, timeouts and 503 retain the exact group UUID and body on every retry", async () => {
+  for (const failure of [new Error("connection lost"), Object.assign(new Error("timeout"), { name: "TimeoutError" }), 503]) {
+    const ui = frontendFixture((call) => {
+      if (ui.calls.length <= 2) {
+        if (failure === 503) return apiResponse({ error: "publish unavailable" }, 503);
+        throw failure;
+      }
+      return apiResponse(sentMessage(call));
+    });
+    const original = " \u0085retry unchanged 🙂\u3000 ";
+    ui.nodes.get("content").value = original;
+    await ui.submit();
+    const pending = ui.run("state.currentCache.pendingSend");
+    assert.ok(pending);
+    assert.equal(pending.inFlight, false);
+    assert.equal(pending.content, original);
+    assert.equal(ui.calls.length, 2);
+    assert.equal(ui.calls[0].raw, ui.calls[1].raw);
+    assert.equal(ui.nodes.get("send-button").textContent, "Gửi lại");
+    ui.nodes.get("content").value = "different draft";
+    ui.nodes.get("content").events.input();
+    await ui.submit();
+    assert.equal(ui.calls.length, 2, "an uncertain send may not be replaced with edited content");
+    ui.nodes.get("content").value = original;
+    ui.nodes.get("content").events.input();
+    await ui.submit();
+    assert.equal(ui.calls[2].raw, ui.calls[0].raw);
+    assert.equal(ui.calls[2].body.message_id, pending.messageID);
+    assert.equal(ui.run("state.currentCache.pendingSend"), null);
+  }
+});
+
+test("a definite rejection clears only the pending belonging to that request", async () => {
+  const reply = deferred();
+  const ui = frontendFixture(() => reply.promise);
+  ui.nodes.get("content").value = "old pending";
+  const sending = ui.submit();
+  ui.run(`state.currentCache.pendingSend = { messageID: "replacement", content: "new pending", inFlight: false };
+    state.currentCache.draftContent = "new pending"; contentInput.value = "new pending";`);
+  const replacement = ui.run("state.currentCache.pendingSend");
+  reply.resolve(apiResponse({ error: "request rejected" }, 400));
+  await sending;
+  assert.equal(ui.run("state.currentCache.pendingSend"), replacement);
+  assert.equal(ui.nodes.get("content").value, "new pending");
+  assert.equal(ui.nodes.get("send-button").textContent, "Gửi lại");
+});
+
+test("old send responses preserve another conversation and a replacement account session", async () => {
+  for (const status of [200, 400, 413, 401]) {
+    const reply = deferred();
+    const ui = frontendFixture(() => reply.promise);
+    ui.nodes.get("content").value = "old request";
+    const sending = ui.submit();
+    ui.context.otherThreadID = OFFLINE;
+    ui.run(`const other = reconcileThreadSummary({ ...fixtureThread, id: otherThreadID, name: "Other" });
+      other.messagesLoaded = true; other.pendingSend = { messageID: "other-pending", content: "other draft", inFlight: false };
+      other.draftContent = "other draft"; state.currentCache = other; state.threadID = other.threadID;
+      state.conversationVersion += 1; contentInput.value = other.draftContent; renderThreadHeading(); showError("other error");`);
+    reply.resolve(status === 200 ? apiResponse(sentMessage(ui.calls[0])) : apiResponse({ error: "old error" }, status));
+    await sending;
+    if (status === 401) {
+      assert.equal(ui.run("state.token"), "", "a current-session 401 must retain the existing logout behavior");
+    } else {
+      assert.equal(ui.nodes.get("content").value, "other draft");
+      assert.equal(ui.nodes.get("error").textContent, "other error");
+      assert.equal(ui.run("state.currentCache.pendingSend.messageID"), "other-pending");
+      assert.equal(ui.run("state.currentCache.messages.size"), 0);
+      assert.equal(ui.run("state.currentCache.summary.last_seq"), 0);
+    }
+
+    const oldReply = deferred();
+    const switched = frontendFixture(() => oldReply.promise);
+    switched.nodes.get("content").value = "account A request";
+    const oldSending = switched.submit();
+    switched.run(`clearSession(); state.token = "new-account-token"; state.currentUserID = "${B}";
+      state.currentUsername = "bob"; state.currentCache = reconcileThreadSummary({ ...fixtureThread });
+      state.currentCache.messagesLoaded = true; state.threadID = fixtureThread.id;
+      state.currentCache.pendingSend = { messageID: "new-account-pending", content: "account B draft", inFlight: false };
+      contentInput.value = "account B draft"; renderThreadHeading(); showError("account B error");`);
+    oldReply.resolve(status === 200 ? apiResponse(sentMessage(switched.calls[0])) : apiResponse({ error: "old error" }, status));
+    await oldSending;
+    assert.equal(switched.run("state.token"), "new-account-token");
+    assert.equal(switched.nodes.get("content").value, "account B draft");
+    assert.equal(switched.nodes.get("error").textContent, "account B error");
+    assert.equal(switched.run("state.currentCache.pendingSend.messageID"), "new-account-pending");
+    assert.equal(switched.run("state.currentCache.messages.size"), 0);
+    assert.equal(switched.run("state.currentCache.summary.last_seq"), 0);
+  }
+});
+
+test("403 refreshes permissions and 409 preserves the existing uncertain pending behavior", async () => {
+  for (const status of [403, 409]) {
+    const ui = frontendFixture((call) => call.url === "/threads" ? apiResponse([ui.context.fixtureThread])
+      : apiResponse({ error: "send refused" }, status));
+    ui.nodes.get("content").value = "keep request";
+    await ui.submit();
+    assert.ok(ui.run("state.currentCache.pendingSend"));
+    assert.equal(ui.nodes.get("send-button").textContent, "Gửi lại");
+    assert.equal(ui.calls.filter((call) => call.method === "POST").length, 1);
+    assert.equal(ui.calls.filter((call) => call.url === "/threads").length, status === 403 ? 1 : 0);
+  }
+});
+
+test("thread.updated validates recipient/thread, debounces summary refresh and never creates a message", async () => {
+  const ui = frontendFixture((call) => {
+    assert.equal(call.url, "/threads", "read notifications may only request summaries when history is complete");
+    return apiResponse([{ ...ui.context.fixtureThread, last_seq: 5, last_read_seq: 5, unread_count: 0 }]);
+  });
+  ui.run("state.currentCache.syncedSeq = 5; state.currentCache.summary.last_seq = 5; state.currentCache.summary.unread_count = 3;");
+  for (const event of [null, {}, { type: "heartbeat" }, { type: "thread.updated", thread_id: T, recipient_id: B },
+    { type: "thread.updated", thread_id: "bad-thread", recipient_id: A },
+    { type: "thread.updated", thread_id: "00000000-0000-0000-0000-000000000000", recipient_id: A },
+    { type: "thread.updated", thread_id: 1, recipient_id: A }, { type: "thread.updated", thread_id: T }]) ui.socketEvent(event);
+  await ui.advance(1000);
+  assert.equal(ui.calls.length, 0);
+  assert.equal(ui.timers.size, 0);
+  for (let index = 0; index < 5; index += 1) ui.socketEvent({ type: "thread.updated", thread_id: T, recipient_id: A });
+  assert.equal(ui.run("state.currentCache.summary.unread_count"), 3, "the notification must not invent counters");
+  assert.equal(ui.run("state.currentCache.lastReadSeq"), 0);
+  assert.equal(ui.run("state.currentCache.messages.size"), 0);
+  assert.equal(ui.run("state.currentCache.summary.last_seq"), 5);
+  await ui.advance(749);
+  assert.equal(ui.calls.length, 0);
+  await ui.advance(1);
+  assert.equal(ui.calls.length, 1);
+  assert.equal(ui.run("state.currentCache.lastReadSeq"), 5);
+  assert.equal(ui.run("state.currentCache.summary.unread_count"), 0);
+  assert.equal(ui.run("state.currentCache.messages.size"), 0);
+  assert.equal(ui.run("state.currentCache.messageIDs.size"), 0);
+  assert.equal(ui.run("state.currentCache.eventMessages.size"), 0);
+  assert.equal(ui.run("state.currentCache.syncedSeq"), 5);
+  ui.socketEvent({ type: "heartbeat" });
+  await ui.advance(10000);
+  assert.equal(ui.calls.length, 1, "idle and heartbeat frames may not add polling");
+  ui.socketEvent({ type: "message.created", thread_id: T, recipient_id: A, message_id: crypto.randomUUID(),
+    sender_id: B, seq: 6, kind: "text", content_format: "plaintext", content: "ordinary message",
+    created_at: "2026-10-11T00:00:00Z" });
+  assert.equal(ui.run("state.currentCache.messages.size"), 1, "message.created must retain normal dispatch");
+  assert.equal(ui.run("state.currentCache.summary.last_seq"), 6);
+  assert.equal(ui.run("state.currentCache.syncedSeq"), 6);
+  assert.equal(ui.run("state.currentCache.summary.unread_count"), 1);
+});
+
+test("a queued read notification cannot refresh a replacement login session", async () => {
+  const ui = frontendFixture(() => { throw new Error("old session must not refresh"); });
+  ui.socketEvent({ type: "thread.updated", thread_id: T, recipient_id: A });
+  ui.run(`clearSession(); state.token = "replacement-token"; state.currentUserID = "${B}";`);
+  await ui.advance(750);
+  assert.equal(ui.calls.length, 0);
+});
+
+test("read summaries update peer read markers and cannot overwrite a newer local read", async () => {
+  let summary;
+  const ui = frontendFixture(() => apiResponse([summary]));
+  ui.run(`state.currentCache.summary = { ...fixtureThread, kind: "direct", peer: fixtureUsers[1], last_seq: 5 };
+    state.currentCache.syncedSeq = 5; state.currentCache.lastReadSeq = 5;
+    state.currentCache.peerLastReadSeq = 2;`);
+  summary = { ...ui.context.fixtureThread, kind: "direct", peer: { id: B, username: "bob" }, last_seq: 5,
+    last_read_seq: 3, peer_last_read_seq: 4, unread_count: 2 };
+  ui.socketEvent({ type: "thread.updated", thread_id: T, recipient_id: A });
+  await ui.advance(750);
+  assert.equal(ui.run("state.currentCache.lastReadSeq"), 5);
+  assert.equal(ui.run("state.currentCache.summary.unread_count"), 0);
+  assert.equal(ui.run("state.currentCache.peerLastReadSeq"), 4);
+  summary.peer_last_read_seq = 1;
+  ui.socketEvent({ type: "thread.updated", thread_id: T, recipient_id: A });
+  await ui.advance(750);
+  assert.equal(ui.run("state.currentCache.peerLastReadSeq"), 4);
+  assert.equal(ui.calls.length, 2);
+});
+
+test("refresh users adds accounts, preserves group/member choices and conversation/E2EE state", async () => {
+  const refreshed = [{ id: A, username: "alice" }, { id: B, username: "bob" }, { id: OFFLINE, username: "new account" }];
+  const second = deferred();
+  const ui = frontendFixture((call) => {
+    assert.equal(call.url, "/users");
+    return ui.calls.length === 2 ? second.promise : apiResponse(refreshed);
+  });
+  await ui.run("loadUsers()");
+  ui.nodes.get("group-users").querySelectorAll("*").find((node) => node.tag === "input" && node.value === B).checked = true;
+  ui.nodes.get("group-name").value = "unfinished group";
+  ui.nodes.get("members-panel").hidden = false;
+  ui.run(`state.currentCache.members = [fixtureUsers[0]]; state.currentCache.membersDirty = false;
+    state.currentCache.pendingSend = { messageID: "preserved-pending", content: "preserved draft", inFlight: false };
+    state.currentCache.draftContent = "preserved draft"; contentInput.value = "preserved draft";
+    renderMembers(state.currentCache);`);
+  ui.nodes.get("add-member-user").value = B;
+  const cache = ui.run("state.currentCache"), client = ui.run("state.e2ee"), pending = cache.pendingSend;
+  ui.run('MiniHermesE2EEClient.create = () => { throw new Error("user refresh must not restart E2EE"); };');
+  const refresh = ui.refresh();
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, true);
+  await ui.refresh();
+  assert.equal(ui.calls.length, 2, "concurrent clicks must not create more user requests");
+  second.resolve(apiResponse([...refreshed, { id: "55555555-5555-4555-8555-555555555555", username: "latest account" }]));
+  await refresh;
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
+  assert.equal(ui.nodes.get("peer-list").children.some((button) => button.textContent === "latest account"), true);
+  assert.equal(ui.nodes.get("group-users").querySelectorAll("input:checked")[0].value, B);
+  assert.equal(ui.nodes.get("add-member-user").value, B);
+  assert.equal(ui.nodes.get("add-member-user").options.some((option) => option.textContent === "latest account"), true);
+  assert.equal(ui.nodes.get("group-name").value, "unfinished group");
+  assert.equal(ui.nodes.get("content").value, "preserved draft");
+  assert.equal(ui.run("state.currentCache"), cache);
+  assert.equal(ui.run("state.currentCache.pendingSend"), pending);
+  assert.equal(ui.run("state.e2ee"), client);
+  assert.equal(ui.run("state.threadID"), T);
+  assert.equal(ui.calls.every((call) => call.url === "/users"), true);
+  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+  assert.ok(html.indexOf('id="refresh-users-button"') < html.indexOf('id="new-direct-section"'),
+    "refresh must stay available even when the new-direct section is hidden");
+});
+
+test("refresh remains available without peers and drops choices for removed users", async () => {
+  let users = [{ id: A, username: "alice" }];
+  const ui = frontendFixture(() => apiResponse(users));
+  await ui.run("loadUsers()");
+  assert.equal(ui.nodes.get("new-direct-section").hidden, true);
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
+  users = [...users, { id: B, username: "bob" }];
+  await ui.refresh();
+  assert.equal(ui.nodes.get("new-direct-section").hidden, false);
+  assert.equal(ui.nodes.get("peer-list").children[0].textContent, "bob");
+  ui.nodes.get("group-users").querySelectorAll("*").find((node) => node.tag === "input").checked = true;
+  ui.nodes.get("members-panel").hidden = false;
+  ui.run("state.currentCache.members = [fixtureUsers[0]]; renderMembers(state.currentCache);");
+  ui.nodes.get("add-member-user").value = B;
+  users = [{ id: A, username: "alice" }, { id: OFFLINE, username: "replacement peer" }];
+  await ui.refresh();
+  assert.equal(ui.nodes.get("group-users").querySelectorAll("input:checked").length, 0);
+  assert.equal(ui.nodes.get("add-member-user").value, OFFLINE);
+  assert.equal(ui.nodes.get("add-member-user").options.some((option) => option.value === B), false);
+  assert.equal(ui.calls.every((call) => call.url === "/users"), true);
+});
+
+test("user refresh errors restore its button and obsolete responses cannot change a new session", async () => {
+  const failure = frontendFixture(() => apiResponse({ error: "users unavailable" }, 503));
+  await failure.refresh();
+  assert.equal(failure.nodes.get("refresh-users-button").disabled, false);
+  assert.equal(failure.run("state.usersRequest"), null);
+
+  const old = deferred(), fresh = deferred();
+  const ui = frontendFixture(() => ui.calls.length === 1 ? old.promise : fresh.promise);
+  const oldRequest = ui.refresh();
+  ui.run(`clearSession(); state.token = "new-user-token"; state.currentUserID = "${B}";
+    state.currentUsername = "bob"; state.users = [{ id: "${B}", username: "bob" }];`);
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
+  const newRequest = ui.refresh();
+  old.resolve(apiResponse([{ id: A, username: "old alice" }]));
+  await oldRequest;
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, true,
+    "old completion may not enable the button during the new session's active refresh");
+  assert.equal(ui.run("state.currentUsername"), "bob");
+  assert.equal(ui.run("state.users[0].id"), B);
+  fresh.resolve(apiResponse([{ id: B, username: "new bob" }, { id: OFFLINE, username: "new peer" }]));
+  await newRequest;
+  assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
+  assert.equal(ui.run("state.currentUsername"), "new bob");
+  assert.equal(ui.nodes.get("peer-list").children[0].textContent, "new peer");
 });
 
 test("real HTTP/Redis/WebSocket round trip and password-only history recovery", {

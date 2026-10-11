@@ -2,9 +2,12 @@ package service
 
 import (
 	"context"
+	"log"
 	"strings"
+	"time"
 
 	messagemodel "github.com/daoquocdai/chat-api/internal/module/message/model"
+	threadevent "github.com/daoquocdai/chat-api/internal/module/thread/event"
 	"github.com/daoquocdai/chat-api/internal/module/thread/model"
 	usermodel "github.com/daoquocdai/chat-api/internal/module/user/model"
 )
@@ -12,7 +15,7 @@ import (
 type Repository interface {
 	CreateOrGetDirect(ctx context.Context, creatorID, peerID int64) (model.Thread, bool, error)
 	ListByUser(ctx context.Context, userID int64) ([]model.Thread, error)
-	MarkRead(ctx context.Context, threadExternalID string, userID, lastReadSeq int64) (int64, error)
+	MarkRead(ctx context.Context, threadExternalID string, userID, lastReadSeq int64) (model.ReadResult, error)
 	CreateGroup(ctx context.Context, creatorID int64, name string, memberIDs []int64, content string) (model.Thread, messagemodel.Message, error)
 	ChangeMember(ctx context.Context, threadExternalID string, actorID, targetID int64, action model.MembershipAction, content string) (messagemodel.Message, error)
 	ListMembers(ctx context.Context, threadExternalID string, actorID int64) ([]model.Member, error)
@@ -26,14 +29,20 @@ type MessagePublisher interface {
 	PublishMessage(context.Context, messagemodel.Message) error
 }
 
-type Service struct {
-	repository Repository
-	users      UserFinder
-	publisher  MessagePublisher
+type ReadNotifier interface {
+	Publish(context.Context, threadevent.ThreadUpdated) error
 }
 
-func New(repository Repository, users UserFinder, publisher MessagePublisher) *Service {
-	return &Service{repository: repository, users: users, publisher: publisher}
+type Service struct {
+	repository     Repository
+	users          UserFinder
+	publisher      MessagePublisher
+	notifier       ReadNotifier
+	publishTimeout time.Duration
+}
+
+func New(repository Repository, users UserFinder, publisher MessagePublisher, notifier ReadNotifier, publishTimeout time.Duration) *Service {
+	return &Service{repository: repository, users: users, publisher: publisher, notifier: notifier, publishTimeout: publishTimeout}
 }
 
 func (s *Service) CreateOrGetDirect(
@@ -98,5 +107,21 @@ func (s *Service) MarkRead(
 		return 0, err
 	}
 
-	return s.repository.MarkRead(ctx, threadExternalID, actor.ID, lastReadSeq)
+	result, err := s.repository.MarkRead(ctx, threadExternalID, actor.ID, lastReadSeq)
+	if err != nil {
+		return 0, err
+	}
+	if s.notifier != nil {
+		recipients := []string{actor.ExternalID}
+		if result.PeerExternalID != "" && result.PeerExternalID != actor.ExternalID {
+			recipients = append(recipients, result.PeerExternalID)
+		}
+		publishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.publishTimeout)
+		err := s.notifier.Publish(publishCtx, threadevent.ThreadUpdated{ThreadID: result.ThreadExternalID, RecipientIDs: recipients})
+		cancel()
+		if err != nil {
+			log.Printf("read notification publish failed thread_id=%s reader_id=%s: %v", threadExternalID, actor.ExternalID, err)
+		}
+	}
+	return result.LastReadSeq, nil
 }

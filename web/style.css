@@ -145,6 +145,8 @@ button:disabled {
 .conversation-section h2 { margin-top: 0; }
 .conversation-section h3 { margin: 16px 0 0; font-size: 0.9rem; }
 
+.refresh-users { width: 100%; margin-top: 12px; }
+
 .session {
   align-items: flex-start;
   flex-direction: column;

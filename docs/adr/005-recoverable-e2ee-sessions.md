@@ -1,25 +1,26 @@
-# ADR 005: E2EE theo phiên, khôi phục trên nhiều thiết bị
+# ADR 005: Phiên E2EE cố định, khôi phục trên nhiều thiết bị
 
-Ngày: 09/10/2026. Trạng thái: đã triển khai. Thay thế [ADR 004](004-e2ee-without-double-ratchet.md) trong runtime.
+Ngày: 09/10/2026. Trạng thái: đã triển khai. Thay thế [ADR 004](004-e2ee-without-double-ratchet.md).
 
 ## Bối cảnh
 
-Khóa chỉ nằm trong IndexedDB làm mất khả năng đọc tin khi đổi máy hoặc đóng phiên ẩn danh. X3DH cho từng tin và một tab sở hữu state không phù hợp với yêu cầu nhiều thiết bị, ít trạng thái và một mật khẩu.
+Khóa chỉ trên một thiết bị không cho đọc lịch sử khi đổi máy hoặc đóng phiên ẩn danh. X3DH từng tin và một tab sở hữu state không đáp ứng một mật khẩu, nhiều thiết bị và ít trạng thái mutable.
 
 ## Quyết định
 
-- Mỗi direct mới khởi tạo X3DH 3/4 DH một lần và dùng phiên cố định trên mọi thiết bị. HKDF stateless dẫn xuất khóa từng message từ SK và context gồm thread, epoch, UUID, sender, recipient. Không dùng Double Ratchet.
-- Client dùng Argon2id rồi HKDF tách auth credential và vault key. Server bcrypt credential; mật khẩu gốc và vault key không gửi lên server.
-- Account vault bất biến chứa private IK/SPK và 20 private OPK, được mã hóa trước khi lưu server. Public OPK claim bị xóa khỏi hàng đợi, còn vault và public bundle gốc được giữ nguyên.
-- Sender lưu bootstrap và backup SK đã mã hóa trong cùng transaction tạo epoch. Recipient khôi phục private prekeys, xác minh SK và ghi backup riêng trước khi chấp nhận phiên. Backup gắn owner/thread/epoch/bootstrap và bất biến sau lần ghi đầu.
-- Transaction khóa thread chọn phiên đầu tiên khi khởi tạo đồng thời. Đề xuất khác nhận `409` kèm phiên canonical để khôi phục. Đăng nhập/mở tab/đổi máy dùng lại phiên cố định; không có luồng thay phiên thủ công hay tự động. ID epoch, các bảng và API danh sách/backup vẫn giữ để đọc lịch sử tương thích đã có.
-- Mọi thiết bị dùng cùng khóa tài khoản đã khôi phục; không giữ Web Lock độc quyền hay profile mutable chung. Realtime bao gồm các thiết bị của sender; retry giữ UUID và ciphertext.
-- Direct chỉ `e2ee_v2`; nhóm plaintext. Chưa triển khai đổi mật khẩu.
+- Mỗi direct mới khởi tạo X3DH một lần; mọi thiết bị/hai chiều dùng cùng SK. HKDF dẫn xuất khóa từng tin theo context; không dùng Double Ratchet hoặc rekey.
+- Client dẫn xuất credential/vault key riêng từ mật khẩu; backend bcrypt credential, không nhận mật khẩu gốc hoặc vault key. Vault tài khoản mã hóa chứa bộ private keys gốc và bất biến.
+- Public OPK claim bị xóa khỏi hàng đợi; private OPK vẫn trong vault để recipient phục hồi cả phiên chưa từng mở. Khi hết public OPK, direct mới dùng X3DH không có OPK.
+- Sender lưu bootstrap và backup SK mã hóa trong transaction khởi tạo. Recipient thiếu backup tính SK từ vault, xác minh confirmation rồi lưu/mở backup canonical trước khi dùng phiên. Mỗi user chỉ đọc backup riêng; bản ghi đầu bất biến.
+- Thread lock chọn phiên đầu tiên. Đề xuất khác nhận `409` và khôi phục phiên canonical; đăng nhập/reload/reconnect không đổi phiên. Epoch ID, schema và API đọc giữ các bản đã có để giải mã lịch sử tương thích.
+- Các thiết bị hoạt động độc lập, realtime bao gồm sender. Không cần state độc quyền của tab để phục hồi. Direct dùng `e2ee_v2`; group plaintext. Chưa có đổi mật khẩu.
 
 ## Đánh đổi
 
-Lưu private prekeys và SK mã hóa phục vụ đọc lịch sử làm giảm bảo vệ từ việc xóa khóa. Khóa backup bị lộ có thể làm lộ lịch sử; thiết kế không có cơ chế phục hồi sau xâm nhập của Double Ratchet. Quên mật khẩu và không còn khóa đã mở thì không khôi phục được. Client cần HTTPS/WSS và frontend đáng tin cậy. Đây là profile riêng của dự án, không tuyên bố tương thích đầy đủ với Signal hay đã audit.
+Vault và archive SK/private prekeys mã hóa giúp phục hồi lịch sử, đồng thời giảm bảo vệ từ việc xóa khóa. Lộ khóa tài khoản/backup có thể lộ lịch sử; không có cơ chế phục hồi sau xâm nhập của Double Ratchet. Quên mật khẩu và không còn khóa đã mở thì không có đường phục hồi.
 
-Argon2id dùng memory 65536 KiB, 3 lượt, parallelism 4, salt 16 byte và output 32 byte, theo [profile thứ hai trong RFC 9106](https://www.rfc-editor.org/rfc/rfc9106.html#section-4). Các primitive và ràng buộc giao thức được tham khảo từ [X3DH](https://signal.org/docs/specifications/x3dh/) và [HKDF RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html).
+Thiết kế giả định vault/epoch còn trên server, HTTPS/WSS và frontend đáng tin cậy. UI chưa có công cụ xác minh fingerprint; pin peer trong RAM không thay thế xác minh ngoài kênh. Đây là profile dự án, chưa được audit và không tuyên bố tương thích đầy đủ Signal.
 
-Wire contract và trình tự xử lý: [luồng E2EE](../e2ee-sequence.md). Schema: [ERD](../chat-api-erd.md).
+Thông số KDF, payload, trình tự và nơi lưu dữ liệu: [E2EE hiện tại](../project-flows.md#e2ee-phiên-cố-định-và-khôi-phục), [dữ liệu client](../project-flows.md#retry-pending-và-dữ-liệu-client). Quan hệ và ràng buộc: [ERD](../chat-api-erd.md).
+
+Nguồn tham khảo thiết kế: [X3DH](https://signal.org/docs/specifications/x3dh/), [HKDF RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html), [Argon2 RFC 9106](https://www.rfc-editor.org/rfc/rfc9106.html).

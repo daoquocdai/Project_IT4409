@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/websocket"
 	messageevent "github.com/daoquocdai/chat-api/internal/module/message/event"
+	threadevent "github.com/daoquocdai/chat-api/internal/module/thread/event"
 )
 
 const queueSize = 64
@@ -190,10 +191,30 @@ func (h *Hub) dispatchTo(event messageevent.MessageCreated, recipientID string) 
 	if err != nil {
 		return err
 	}
+	h.queueTo(recipientID, data)
+	return nil
+}
+
+func (h *Hub) DispatchThreadUpdated(event threadevent.ThreadUpdated) error {
+	for _, recipientID := range event.RecipientIDs {
+		data, err := json.Marshal(struct {
+			Type        string `json:"type"`
+			ThreadID    string `json:"thread_id"`
+			RecipientID string `json:"recipient_id"`
+		}{Type: threadevent.ThreadUpdatedType, ThreadID: event.ThreadID, RecipientID: recipientID})
+		if err != nil {
+			return err
+		}
+		h.queueTo(recipientID, data)
+	}
+	return nil
+}
+
+func (h *Hub) queueTo(recipientID string, data []byte) {
 	h.mu.RLock()
 	if h.stopping {
 		h.mu.RUnlock()
-		return nil
+		return
 	}
 	var slow []*client
 	for c := range h.clients[recipientID] {
@@ -208,5 +229,4 @@ func (h *Hub) dispatchTo(event messageevent.MessageCreated, recipientID string) 
 	for _, c := range slow {
 		h.remove(c)
 	}
-	return nil
 }

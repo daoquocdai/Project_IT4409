@@ -21,11 +21,6 @@ import (
 
 var errInput = errors.New("invalid input")
 
-type keyPairDTO struct {
-	PrivateKey string `json:"private_key"`
-	PublicKey  string `json:"public_key"`
-}
-
 type bridgeError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -43,8 +38,6 @@ var callbacks []js.Func
 func main() {
 	bridge := js.Global().Get("Object").New()
 	methods := map[string]func([]byte) (any, error){
-		"generateKeyPair": generateKeyPair, "signPrekey": signPrekey,
-		"verifyBundle":  verifyBundle,
 		"createAccount": createAccount, "deriveCredentials": deriveCredentials,
 		"openAccount": openAccount, "createEpoch": createEpoch, "openEpoch": openEpoch,
 		"encryptEpochBackup": encryptEpochBackup, "decryptEpochBackup": decryptEpochBackup,
@@ -207,10 +200,6 @@ func bundle(raw json.RawMessage) (e2ee.Bundle, error) {
 	return value, nil
 }
 
-func dto(pair e2ee.KeyPair) keyPairDTO {
-	return keyPairDTO{PrivateKey: base64.StdEncoding.EncodeToString(pair.Private[:]), PublicKey: base64.StdEncoding.EncodeToString(pair.Public[:])}
-}
-
 func digest(data []byte) string {
 	hash := sha256.Sum256(data)
 	return hex.EncodeToString(hash[:])
@@ -219,61 +208,4 @@ func digest(data []byte) string {
 func fingerprint(encoded string) string {
 	public, _ := base64.StdEncoding.DecodeString(encoded) // already validated
 	return digest(public)
-}
-
-func generateKeyPair(raw []byte) (any, error) {
-	fields, err := object(raw, nil, []string{"private_key"})
-	if err != nil {
-		return nil, err
-	}
-	var pair e2ee.KeyPair
-	if value, exists := fields["private_key"]; exists {
-		pair.Private, err = key32(value)
-		if err != nil {
-			return nil, err
-		}
-		private, err := ecdh.X25519().NewPrivateKey(pair.Private[:])
-		if err != nil {
-			return nil, e2ee.ErrInvalidKey
-		}
-		copy(pair.Public[:], private.PublicKey().Bytes())
-	} else {
-		pair, err = e2ee.GenerateKeyPair()
-		if err != nil {
-			return nil, err
-		}
-	}
-	return map[string]any{"key_pair": dto(pair), "fingerprint": digest(pair.Public[:])}, nil
-}
-
-func signPrekey(raw []byte) (any, error) {
-	fields, err := object(raw, []string{"identity_private_key", "signed_prekey_public_key"}, nil)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := key32(fields["identity_private_key"])
-	if err != nil {
-		return nil, err
-	}
-	signed, err := key32(fields["signed_prekey_public_key"])
-	if err != nil {
-		return nil, err
-	}
-	signature, err := e2ee.SignPrekey(identity, signed)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"signature": base64.StdEncoding.EncodeToString(signature[:])}, nil
-}
-
-func verifyBundle(raw []byte) (any, error) {
-	fields, err := object(raw, []string{"bundle"}, nil)
-	if err != nil {
-		return nil, err
-	}
-	value, err := bundle(fields["bundle"])
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"valid": true, "fingerprint": fingerprint(value.IdentityPublicKey)}, nil
 }

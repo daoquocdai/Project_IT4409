@@ -9,6 +9,7 @@ const websocketHeartbeatTimeoutMs = 15000;
 const websocketResumeGraceMs = 5000;
 const historyBottomTolerance = 4;
 const pendingSendMismatchMessage = "Tin trước chưa được xác nhận. Khôi phục đúng nội dung cũ để bấm Gửi lại; chỉ gửi tin mới sau khi tin cũ thành công.";
+const groupContentValidationMessage = "Tin nhắn cần có từ 1 đến 1000 ký tự Unicode sau khi bỏ khoảng trắng đầu/cuối và không chứa NUL.";
 
 const authView = document.querySelector("#auth-view");
 const chatView = document.querySelector("#chat-view");
@@ -22,6 +23,7 @@ const peerList = document.querySelector("#peer-list");
 const directThreadList = document.querySelector("#direct-thread-list");
 const groupThreadList = document.querySelector("#group-thread-list");
 const newDirectSection = document.querySelector("#new-direct-section");
+const refreshUsersButton = document.querySelector("#refresh-users-button");
 const peerName = document.querySelector("#peer-name");
 const threadStatus = document.querySelector("#thread-status");
 const historyElement = document.querySelector("#history");
@@ -55,7 +57,7 @@ const e2eeLabels = {
 
 const state = {
   token: "", sessionVersion: 0, sessionAbort: new AbortController(),
-  currentUserID: "", currentUsername: "", users: [],
+  currentUserID: "", currentUsername: "", users: [], usersRequest: null,
   // One entry per thread: summary, permissions, messages, drafts and requests.
   threads: new Map(), directRequestsByPeer: new Map(),
   threadID: "", currentCache: null, conversationVersion: 0,
@@ -168,7 +170,15 @@ function updateSendButton() {
   sendButton.textContent = !encrypted && pending ? "Gửi lại" : "Gửi";
   sendButton.disabled = !allowed || Boolean(pending?.inFlight) || Boolean(cache?.e2eeSending);
   contentInput.disabled = !allowed || Boolean(cache?.e2eeSending);
-  contentInput.maxLength = encrypted ? 2000 : 1000;
+  // HTML maxlength counts UTF-16 units; group validation counts Unicode points.
+  if (encrypted) contentInput.maxLength = 2000;
+  else contentInput.removeAttribute("maxlength");
+}
+function validGroupContent(content) {
+  // Match Go strings.TrimSpace (U+0085 is whitespace, U+FEFF is not).
+  const trimmed = content.replace(/^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, "");
+  const length = [...trimmed].length;
+  return length >= 1 && length <= 1000 && !trimmed.includes("\u0000");
 }
 function renderThreadHeading() {
   const cache = state.currentCache;
@@ -269,6 +279,8 @@ function clearSession() {
   state.currentUserID = "";
   state.currentUsername = "";
   state.users = [];
+  state.usersRequest = null;
+  refreshUsersButton.disabled = false;
   state.threads = new Map();
   state.directRequestsByPeer = new Map();
   state.threadListRequest = null;
@@ -393,23 +405,39 @@ function renderPeerList() {
   }
 }
 async function loadUsers() {
+  if (state.usersRequest) return state.usersRequest.promise;
   const sessionVersion = state.sessionVersion, token = state.token;
-  const users = await apiRequest("/users");
-  if (!currentSessionMatches(sessionVersion, token)) return;
-  const me = users.find((user) => user.id === state.currentUserID);
-  if (!me) { clearSession(); throw new Error("Tài khoản không còn tồn tại."); }
-  state.users = users;
-  state.currentUsername = me.username;
-  currentUsername.textContent = me.username;
-  groupUsers.replaceChildren();
-  for (const user of users.filter((user) => user.id !== state.currentUserID)) {
-    const label = document.createElement("label");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox"; checkbox.value = user.id;
-    const name = document.createElement("span"); name.textContent = user.username;
-    label.append(checkbox, name); groupUsers.append(label);
-  }
-  renderPeerList();
+  const request = {};
+  state.usersRequest = request;
+  refreshUsersButton.disabled = true;
+  request.promise = (async () => {
+    try {
+      const users = await apiRequest("/users");
+      if (!currentSessionMatches(sessionVersion, token)) return;
+      const me = users.find((user) => user.id === state.currentUserID);
+      if (!me) { clearSession(); throw new Error("Tài khoản không còn tồn tại."); }
+      const selected = new Set([...groupUsers.querySelectorAll('input:checked')].map((input) => input.value));
+      state.users = users;
+      state.currentUsername = me.username;
+      currentUsername.textContent = me.username;
+      groupUsers.replaceChildren();
+      for (const user of users.filter((user) => user.id !== state.currentUserID)) {
+        const label = document.createElement("label");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox"; checkbox.value = user.id; checkbox.checked = selected.has(user.id);
+        const name = document.createElement("span"); name.textContent = user.username;
+        label.append(checkbox, name); groupUsers.append(label);
+      }
+      renderPeerList();
+      if (state.currentCache) renderMembers(state.currentCache);
+    } finally {
+      if (state.usersRequest === request) {
+        state.usersRequest = null;
+        refreshUsersButton.disabled = false;
+      }
+    }
+  })();
+  return request.promise;
 }
 function receivedMessage(message) {
   return message.sender_id !== state.currentUserID;
@@ -903,6 +931,16 @@ function handleSocketMessage(data) {
   try {
     event = JSON.parse(data);
   } catch {
+    return;
+  }
+  if (!event || typeof event !== "object") return;
+  if (event.type === "thread.updated") {
+    if (event.recipient_id === state.currentUserID &&
+        [event.thread_id, event.recipient_id].every((id) => typeof id === "string" &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) &&
+          id !== "00000000-0000-0000-0000-000000000000")) {
+      scheduleThreadSummaryRefresh();
+    }
     return;
   }
   const seq = Number(event.seq);
@@ -1564,6 +1602,10 @@ messageForm.addEventListener("submit", async (event) => {
     return;
   }
   if (!pending) {
+    if (!validGroupContent(content)) {
+      showError(groupContentValidationMessage);
+      return;
+    }
     pending = { messageID: crypto.randomUUID(), content, inFlight: false };
     cache.pendingSend = pending;
   }
@@ -1594,15 +1636,18 @@ messageForm.addEventListener("submit", async (event) => {
       renderMessages(currentConversationMatches(snapshot) ? "bottom" : "new");
     }
   } catch (error) {
+    if (!cacheSnapshotMatches(snapshot)) return;
+    const rejected = error.status === 400 || error.status === 413;
+    if (rejected && cache.pendingSend === pending) cache.pendingSend = null;
     if (cacheSnapshotMatches(snapshot) && error.status === 403) void loadThreads();
     if (cacheSnapshotMatches(snapshot) && state.currentCache === cache) {
-      showError(contentInput.value === pending.content
+      showError(rejected ? errorMessage(error) : contentInput.value === pending.content
         ? `${errorMessage(error)} Tin chưa được xác nhận; bấm Gửi lại với nội dung cũ.`
         : pendingSendMismatchMessage);
     }
   } finally {
     pending.inFlight = false;
-    if (state.currentCache === cache) {
+    if (cacheSnapshotMatches(snapshot) && state.currentCache === cache) {
       updateSendButton();
     }
   }
@@ -1616,6 +1661,18 @@ contentInput.addEventListener("input", () => {
     showError(pendingSendMismatchMessage);
   } else if (errorElement.textContent === pendingSendMismatchMessage) {
     showError("");
+  } else if (errorElement.textContent === groupContentValidationMessage && validGroupContent(contentInput.value)) {
+    showError("");
+  }
+});
+
+refreshUsersButton.addEventListener("click", async () => {
+  if (!state.token || state.usersRequest) return;
+  const sessionVersion = state.sessionVersion, token = state.token;
+  try {
+    await loadUsers();
+  } catch (error) {
+    if (currentSessionMatches(sessionVersion, token)) showError(error);
   }
 });
 

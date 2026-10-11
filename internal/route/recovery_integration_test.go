@@ -28,6 +28,7 @@ import (
 	threaddto "github.com/daoquocdai/chat-api/internal/module/thread/dto"
 	threadhandler "github.com/daoquocdai/chat-api/internal/module/thread/handler"
 	"github.com/daoquocdai/chat-api/internal/module/thread/membership"
+	threadpublisher "github.com/daoquocdai/chat-api/internal/module/thread/publisher"
 	threadrepository "github.com/daoquocdai/chat-api/internal/module/thread/repository"
 	threadservice "github.com/daoquocdai/chat-api/internal/module/thread/service"
 	userdto "github.com/daoquocdai/chat-api/internal/module/user/dto"
@@ -93,7 +94,7 @@ func TestRecoverableE2EEIntegration(t *testing.T) {
 	userRepo := userrepository.New(pool)
 	users := userservice.New(userRepo, jwt)
 	messages := messageservice.New(messagerepository.New(pool), users, messagepublisher.NewRedis(rdb, stream), membership.NewRedis(rdb, stream), time.Second)
-	threads := threadservice.New(threadrepository.New(pool), users, messages)
+	threads := threadservice.New(threadrepository.New(pool), users, messages, threadpublisher.NewRedis(rdb, stream), time.Second)
 	cryptoService := e2eeservice.New(e2eerepository.New(pool), users)
 	tickets := wsticket.NewService(wsticket.NewRedisRepository(rdb), cfg.WSTicketTTL)
 	gin.SetMode(gin.TestMode)
@@ -287,12 +288,64 @@ func TestRecoverableE2EEIntegration(t *testing.T) {
 	api.require(http.MethodPost, "/threads/"+group.ID+"/messages", alice.token, encryptedMessage(t, alice.id, bob.id, group.ID, winner.EpochID, selected.key, "group encrypted"), http.StatusConflict, nil)
 	api.require(http.MethodPost, "/e2ee/bundles/"+bob.id+"/claim", alice.token, e2ee.ClaimRequest{ThreadID: group.ID}, http.StatusConflict, nil)
 
+	// Invalid reads must neither advance a marker nor publish a notification.
+	beforeInvalidRead, err := rdb.XLen(ctx, stream).Result()
+	if err != nil {
+		t.Fatal("integration Redis stream length failed")
+	}
+	tooHigh, current := latest.Seq+1, latest.Seq
+	api.require(http.MethodPut, "/threads/"+direct.ID+"/read", bob.token, threaddto.MarkReadRequest{LastReadSeq: &tooHigh}, http.StatusBadRequest, nil)
+	api.require(http.MethodPut, "/threads/"+direct.ID+"/read", charlie.token, threaddto.MarkReadRequest{LastReadSeq: &current}, http.StatusForbidden, nil)
+	afterInvalidRead, err := rdb.XLen(ctx, stream).Result()
+	if err != nil || afterInvalidRead != beforeInvalidRead {
+		t.Fatal("invalid read published a notification")
+	}
+	var read threaddto.MarkReadResponse
+	api.require(http.MethodPut, "/threads/"+direct.ID+"/read", bob.token, threaddto.MarkReadRequest{LastReadSeq: &current}, http.StatusOK, &read)
+	if read.LastReadSeq != current {
+		t.Fatal("direct read did not return the committed marker")
+	}
+	// Retrying an older marker keeps the greatest stored value and may notify again.
+	older := first.Seq
+	api.require(http.MethodPut, "/threads/"+direct.ID+"/read", bob.token, threaddto.MarkReadRequest{LastReadSeq: &older}, http.StatusOK, &read)
+	if read.LastReadSeq != current {
+		t.Fatal("older read retry regressed the committed marker")
+	}
+	groupSeq := groupMessage.Seq
+	api.require(http.MethodPut, "/threads/"+group.ID+"/read", bob.token, threaddto.MarkReadRequest{LastReadSeq: &groupSeq}, http.StatusOK, &read)
+	if read.LastReadSeq != groupSeq {
+		t.Fatal("group read did not return the committed marker")
+	}
+
 	entries, err := rdb.XRange(ctx, stream, "-", "+").Result()
 	if err != nil {
 		t.Fatal("integration Redis stream read failed")
 	}
 	seen := map[string]int{}
+	readNotifications := map[string]int{}
 	for _, entry := range entries {
+		if entry.Values["event"] == "thread.updated" {
+			threadID, _ := entry.Values["thread_id"].(string)
+			var recipients []string
+			value, _ := entry.Values["recipient_ids"].(string)
+			if json.Unmarshal([]byte(value), &recipients) != nil || len(entry.Values) != 3 {
+				t.Fatal("read notification carried an invalid payload")
+			}
+			switch threadID {
+			case direct.ID:
+				if len(recipients) != 2 || !containsAccount(recipients, alice.id) || !containsAccount(recipients, bob.id) {
+					t.Fatal("direct read omitted reader or peer devices")
+				}
+			case group.ID:
+				if !reflect.DeepEqual(recipients, []string{bob.id}) {
+					t.Fatal("group read notified accounts other than the reader")
+				}
+			default:
+				t.Fatal("read notified an unrelated thread")
+			}
+			readNotifications[threadID]++
+			continue
+		}
 		messageID, _ := entry.Values["message_id"].(string)
 		if messageID != first.ID && messageID != reply.ID && messageID != groupMessage.ID {
 			continue
@@ -306,6 +359,9 @@ func TestRecoverableE2EEIntegration(t *testing.T) {
 	}
 	if seen[first.ID] != 2 || seen[reply.ID] != 1 || seen[groupMessage.ID] != 1 {
 		t.Fatal("realtime publish/retry did not preserve committed identities")
+	}
+	if readNotifications[direct.ID] != 2 || readNotifications[group.ID] != 1 {
+		t.Fatal("read commit or retry notification was missing")
 	}
 }
 

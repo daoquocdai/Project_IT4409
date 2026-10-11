@@ -1,16 +1,20 @@
-# ADR 001: Tách API, gateway và Redis Stream
+# ADR 001: Tách API, gateway và Redis Streams
+
+Trạng thái: đã triển khai.
 
 ## Bối cảnh
 
-HTTP API lưu tin; WebSocket giữ kết nối dài hạn. Hai thành phần cần vòng đời và trách nhiệm riêng.
+HTTP API xử lý transaction ngắn, WebSocket giữ kết nối dài hạn. Hai tiến trình cần trách nhiệm và vòng đời riêng; PostgreSQL giữ lịch sử để client lấy bù khi realtime bị gián đoạn.
 
 ## Quyết định
 
-- API và gateway chạy riêng; gateway không kết nối PostgreSQL.
-- Sau commit, API publish `message.created` với snapshot `recipient_ids` tại message seq.
-- Một gateway instance, group `ws-gateway`, consumer `gateway-1`; đọc pending bằng `XREADGROUP ... 0` trước entry mới bằng `>`.
-- `XACK` sau xử lý, kể cả recipient offline; không xác nhận giao tin/đọc tin. Client lấy bù REST.
+- API kết nối PostgreSQL/Redis; gateway chỉ dùng Redis, ticket/JWT và Hub, không truy vấn database.
+- Sau commit, API ghi cùng Redis Stream hai event: `message.created` mang snapshot thành viên tại message seq (gồm sender), `thread.updated` yêu cầu các kết nối tải lại summary sau read marker.
+- Gateway gửi tới mọi socket của recipient, dùng một instance, group `ws-gateway` và consumer cố định `gateway-1`. Đọc pending `0` trước entry mới `>`, rồi `XACK` sau xử lý/queue; recipient offline vẫn ACK.
+- Queue socket có giới hạn; kết nối chậm bị đóng. Client gộp UUID và lấy bù REST khi reconnect/gap.
 
 ## Đánh đổi
 
-Commit và XADD không nguyên tử; chưa có outbox. Publish lỗi trả `503`; retry giữ UUID/payload nhưng có thể phát event trùng. Client phải khử trùng UUID. Chi tiết: [luồng xử lý](../request-flow.md).
+DB commit và XADD không nguyên tử; chưa có transactional outbox. Publish message lỗi trả `503` dù tin đã lưu; retry cùng UUID có thể phát event trùng. Publish read notification là best effort: log lỗi, marker đã commit vẫn thành công. XACK không xác nhận delivery hoặc việc đọc. Mô hình consumer hiện tại chưa hỗ trợ nhiều gateway instance.
+
+Trình tự, payload và timeout: [chat nhóm realtime](../project-flows.md#chat-nhóm-realtime), [read notification](../project-flows.md#read-marker-unread-và-nhiều-tab).

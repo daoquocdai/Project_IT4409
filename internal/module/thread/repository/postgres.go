@@ -135,12 +135,12 @@ func threadFromRow(row sqlc.GetThreadSummaryForUserRow) model.Thread {
 	return thread
 }
 
-func (r *PostgresRepository) MarkRead(ctx context.Context, threadExternalID string, userID, lastReadSeq int64) (int64, error) {
+func (r *PostgresRepository) MarkRead(ctx context.Context, threadExternalID string, userID, lastReadSeq int64) (model.ReadResult, error) {
 	threadID, err := parseThreadUUID(threadExternalID)
 	if err != nil {
-		return 0, err
+		return model.ReadResult{}, err
 	}
-	var stored int64
+	result := model.ReadResult{ThreadExternalID: threadID.String()}
 	err = pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		q := sqlc.New(tx)
 		thread, err := q.LockThreadByExternalID(ctx, threadID)
@@ -156,13 +156,26 @@ func (r *PostgresRepository) MarkRead(ctx context.Context, threadExternalID stri
 			}
 			return err
 		}
-		stored, err = q.MarkThreadRead(ctx, sqlc.MarkThreadReadParams{LastReadSeq: lastReadSeq, UserID: userID, ThreadExternalID: threadID})
+		result.LastReadSeq, err = q.MarkThreadRead(ctx, sqlc.MarkThreadReadParams{LastReadSeq: lastReadSeq, UserID: userID, ThreadExternalID: threadID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.ErrInvalidReadSequence
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		if thread.Kind == "direct" {
+			summary, err := q.GetThreadSummaryForUser(ctx, sqlc.GetThreadSummaryForUserParams{UserID: userID, ThreadExternalID: threadID})
+			if err != nil {
+				return err
+			}
+			result.PeerExternalID = summary.PeerExternalID.String()
+		}
+		return nil
 	})
-	return stored, err
+	if err != nil {
+		return model.ReadResult{}, err
+	}
+	return result, nil
 }
 
 func parseThreadUUID(value string) (pgtype.UUID, error) {

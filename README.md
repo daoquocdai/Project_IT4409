@@ -1,119 +1,167 @@
 # Mini-Hermes Chat API
 
-Ứng dụng chat dùng Go, Gin, PostgreSQL, sqlc và Redis. Direct luôn E2EE; nhóm dùng plaintext. Go/WASM mã hóa tại client, HTTP API lưu tin và gateway riêng phát WebSocket.
+Mini-Hermes gồm hai tiến trình Go: HTTP API xử lý nghiệp vụ và lưu PostgreSQL; gateway nhận sự kiện qua Redis Streams rồi phát WebSocket. Direct (chat hai người) dùng mã hóa đầu cuối E2EE tại browser qua Go/WASM; nhóm lưu và truyền plaintext.
 
-Một mật khẩu tài khoản đủ để khôi phục khóa và lịch sử trên thiết bị hoặc phiên ẩn danh mới. Nhiều tab/thiết bị dùng cùng tài khoản đồng thời. Mỗi direct khởi tạo X3DH một lần rồi dùng lại cùng phiên khóa; mỗi tin chỉ dẫn xuất khóa bằng HKDF, không dùng Double Ratchet.
+Mỗi direct khởi tạo X3DH một lần, dùng phiên khóa cố định và dẫn xuất khóa riêng cho từng tin. Đúng username/mật khẩu cho phép khôi phục khóa và lịch sử trên tab, thiết bị hoặc phiên ẩn danh mới; nhiều thiết bị có thể hoạt động đồng thời. Quyết định và giới hạn nằm trong [ADR 005](docs/adr/005-recoverable-e2ee-sessions.md).
 
 ## Chạy local
 
-Yêu cầu: Go theo [go.mod](go.mod), Docker Compose, `goose`, `make`. Trình duyệt cần secure context, WebAssembly và `crypto.randomUUID`; localhost đáp ứng secure context. Không cần IndexedDB hoặc Web Locks.
+Cần Go theo [go.mod](go.mod), Docker Compose, GNU Make và `goose` trên PATH. Node.js có `fetch` và WebSocket dùng cho kiểm thử client. `sqlc` chỉ cần khi sinh lại mã truy vấn. Browser cần secure context, WebAssembly và `crypto.randomUUID`; `localhost` đáp ứng secure context.
+
+Tại thư mục repository, chạy bằng PowerShell:
 
 ```powershell
 Copy-Item config/config.yml.example config/config.yml
-# Thay auth.jwt_secret trong config/config.yml trước khi chạy.
-docker compose up -d
+# Đổi auth.jwt_secret trong config/config.yml thành secret ngẫu nhiên trước khi chạy.
+make up
 $env:DATABASE_URL = 'postgres://chat:chat@localhost:5432/chat_api?sslmode=disable'
-goose -dir db/migrations postgres $env:DATABASE_URL up
+make migrate
 make wasm
 ```
 
-Chạy `go run ./cmd` và `go run ./cmd/ws-gateway` ở hai terminal; mở `http://localhost:8080`. Đăng ký tự chuẩn bị và sao lưu khóa E2EE, không cần upload bundle thủ công. Mở tab/profile khác rồi đăng nhập bằng cùng username/mật khẩu để dùng nhiều thiết bị.
+Mở hai terminal tại repository:
 
-API/gateway đọc `config/config.yml`; `DATABASE_URL` ở trên dùng cho migration. Khi đổi host, cập nhật `ws_public_url`, `ws_allowed_origins` và dùng HTTPS/WSS. Binary WASM và `wasm_exec.js` phải được build từ cùng Go toolchain.
+```powershell
+# Terminal API
+make run
+```
 
-### Reset dữ liệu local
+```powershell
+# Terminal gateway
+make gateway
+```
 
-Migration `20261009100000` yêu cầu database phát triển đã reset: tài khoản cũ không có encrypted vault và không được chuyển tự động. Sau reset phải đăng ký lại; vault/public prekeys mới được tạo tự động. Migration `down` không phục hồi dữ liệu đã xóa.
+Mở `http://localhost:8080`, đăng ký A/B trên hai profile trình duyệt rồi chat. Đăng ký tự tạo và sao lưu khóa, không cần upload bundle thủ công. Có thể dùng `go run ./cmd` và `go run ./cmd/ws-gateway` thay cho hai target chạy server.
 
-Dừng API/gateway. Với schema hiện tại của database `chat_api` trong Docker Compose dự án, xóa cả bảy bảng nghiệp vụ:
+API/gateway đọc `config/config.yml`; `DATABASE_URL` chỉ truyền cho migration. Nếu thay database URL, sửa cả config và biến môi trường. `make migrate-status` xem phiên bản schema; `make sqlc` sinh lại truy vấn. Target `wasm` có nhánh Windows/PowerShell, tạo `web/e2ee.wasm` và `web/wasm_exec.js` từ cùng Go toolchain. Khi đổi host, cập nhật `ws_public_url`, `ws_allowed_origins`; dùng HTTPS/WSS ngoài localhost.
+
+### Reset dữ liệu local (tùy chọn)
+
+Chỉ reset database phát triển khi cần xóa fixture hoặc nâng tài khoản/schema cũ không có encrypted vault. Database mới không cần reset mỗi lần chạy. Migration `20261009100000` yêu cầu tài khoản cũ đã được xóa, không chuyển đổi khóa tự động; migration `down` không phục hồi dữ liệu bị xóa.
+
+Dừng API/gateway. Với schema hiện tại và Docker Compose mặc định:
 
 ```powershell
 docker compose exec -T postgres psql -U chat -d chat_api -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE messages, participants, threads, prekeys, users, e2ee_epochs, e2ee_epoch_backups RESTART IDENTITY CASCADE;"
-goose -dir db/migrations postgres $env:DATABASE_URL up
+make migrate
+
+# Dùng đúng redis.stream và redis.database trong config; dưới đây là cấu hình mẫu.
+$chatStream = 'mini-hermes:events'
+docker compose exec -T redis redis-cli -n 0 DEL $chatStream
+docker compose exec -T redis redis-cli -n 0 --scan --pattern "${chatStream}:membership:*" | ForEach-Object { docker compose exec -T redis redis-cli -n 0 DEL $_ }
+docker compose exec -T redis redis-cli -n 0 --scan --pattern 'mini-hermes:ws-ticket:*' | ForEach-Object { docker compose exec -T redis redis-cli -n 0 DEL $_ }
 ```
 
-Nếu nâng từ schema cũ chưa có hai bảng epoch, truncate năm bảng cũ (`messages`, `participants`, `threads`, `prekeys`, `users`) với `CASCADE` trước khi chạy migration mới. Trong Redis database được cấu hình, xóa Stream ở `redis.stream`, cache `<stream>:membership:*` và vé `mini-hermes:ws-ticket:*` của dự án; giữ nguyên key ngoài các namespace này. Gateway tạo lại consumer group sau khi Stream bị xóa.
-
-Đăng xuất rồi đăng ký/đăng nhập lại trong browser. Reset server không xóa bộ nhớ browser; outbox cũ được scope theo origin/API và user UUID, không dùng cho UUID tài khoản mới.
+Nếu nâng schema cũ chưa có bảng epoch, truncate năm bảng `messages, participants, threads, prekeys, users` với `RESTART IDENTITY CASCADE` trước `make migrate`. Chỉ xóa Redis key của dự án. Gateway tạo lại consumer group khi khởi động. Đăng xuất rồi đăng ký lại; tài khoản mới có UUID mới nên không sử dụng outbox của tài khoản đã xóa.
 
 ## HTTP API
 
-Auth API không nhận mật khẩu gốc. Browser dẫn xuất `auth_credential` và vault key riêng; chỉ credential đi tới server. Các endpoint yêu cầu `Authorization: Bearer <access_token>`, trừ health và ba auth endpoints công khai.
+Các endpoint nghiệp vụ yêu cầu `Authorization: Bearer <access_token>`; `/health` và ba endpoint auth đầu tiên công khai. Actor lấy từ JWT `sub`, không lấy từ body. Auth chỉ nhận credential dẫn xuất, không nhận mật khẩu gốc. Router: [`route.New`](internal/route/router.go).
 
 | Method | Path | Chức năng / request chính |
 | --- | --- | --- |
-| `GET` | `/health` | Trạng thái API |
+| `GET` | `/health` | `{"status":"ok"}` |
 | `GET` | `/auth/params?username=...` | Username chuẩn hóa và KDF công khai |
 | `POST` | `/auth/register` | `username`, `auth_credential`, `kdf`, `public_bundle`, `account_vault` |
 | `POST` | `/auth/login` | `username`, `auth_credential`; trả JWT, `token_type`, `user_id` |
 | `GET` | `/users` | Danh sách tài khoản |
-| `POST` | `/auth/ws-ticket` | Vé WebSocket một lần |
+| `POST` | `/auth/ws-ticket` | Vé WebSocket một lần và URL gateway |
 | `GET` | `/e2ee/account` | Vault và public bundle gốc của actor |
 | `POST` | `/threads/direct` | Tạo/mở direct bằng `peer_id` |
 | `POST` | `/threads/group` | Tạo nhóm bằng `name`, `member_ids` |
-| `GET` | `/threads` | Thread đang tham gia |
+| `GET` | `/threads` | Summary các thread đang tham gia, read marker và unread |
 | `GET` | `/threads/:id/members` | Thành viên nhóm |
 | `POST` | `/threads/:id/members` | Admin thêm `user_id` |
 | `DELETE` | `/threads/:id/members/:user_id` | Admin xóa người khác |
 | `POST` | `/threads/:id/leave` | Rời nhóm |
-| `POST` | `/e2ee/bundles/:user_id/claim` | Bundle peer khi khởi tạo phiên direct; body `thread_id` |
+| `POST` | `/e2ee/bundles/:user_id/claim` | Claim bundle peer; body `thread_id` |
 | `GET` | `/threads/:id/epochs` | Bootstrap, backup của actor và `current_epoch_id` |
 | `POST` | `/threads/:id/epochs` | Khởi tạo phiên cố định: `epoch_id`, `bootstrap`, `key_backup` |
-| `PUT` | `/threads/:id/epochs/:epoch_id/key` | Lưu `key_backup`; trả bản đã commit |
+| `PUT` | `/threads/:id/epochs/:epoch_id/key` | Lưu backup; trả bản đã commit |
 | `GET` | `/threads/:id/messages` | Lịch sử với `before_seq`, `limit` |
 | `POST` | `/threads/:id/messages` | `message_id`, `content_format`, `content` |
 | `PUT` | `/threads/:id/read` | Tăng `last_read_seq` |
 
-Actor lấy từ JWT `sub`. Gateway nhận `GET /ws?ticket=...`; ticket được tiêu thụ một lần trước upgrade. Claim/epoch APIs chỉ áp dụng cho direct, không cho nhóm. Không còn endpoint upload/refill prekeys.
+Gateway nhận `GET /ws?ticket=...`; client ngoài browser cũng có thể dùng Bearer JWT trong header. Claim/epoch APIs chỉ áp dụng cho direct. Payload mật mã được giải thích tại [luồng E2EE](docs/project-flows.md#e2ee-phiên-cố-định-và-khôi-phục).
 
-## Khóa, epoch và khôi phục
+## Sơ đồ sequence tóm tắt
 
-- **Một mật khẩu:** Argon2id profile v1 cố định: salt 16 byte, `memory_kib=65536`, `iterations=3`, `parallelism=4`, output 32 byte. HKDF-SHA-256 tách auth credential/vault key theo mục đích và username. Server lưu bcrypt hash của credential, không nhận mật khẩu gốc hoặc vault key.
-- **Vault bất biến:** đăng ký sinh IK, SPK và 20 OPK; hash, KDF, public bundle gốc, encrypted vault và public OPK được commit cùng transaction. Claim xóa public OPK khả dụng, nhưng bundle gốc và private OPK trong encrypted vault vẫn giữ để phục hồi. Không có luồng đổi mật khẩu.
-- **Phiên cố định:** mỗi direct khởi tạo X3DH 3/4 DH một lần, tạo bootstrap có key confirmation và backup SK mã hóa. Khóa thread chọn phiên đầu tiên; epoch, backup sender và con trỏ current commit cùng transaction. Đề xuất khác trả `409` kèm phiên canonical để client khôi phục. Recipient xác minh bootstrap rồi lưu backup riêng và chờ ACK trước khi dùng SK. Hết public OPK, direct mới dùng 3DH.
-- **Tin direct:** `content_format=e2ee_v2`; `content` là chuỗi JSON gồm `version`, `epoch_id`, `recipient_id`, `nonce`, `ciphertext`. Mỗi tin dẫn xuất key từ SK và context thread/epoch/message/sender/recipient, rồi AES-256-GCM. Reply dùng cùng epoch, không claim/X3DH lại.
-- **Retry:** giữ nguyên UUID, epoch và envelope; trả cùng `seq`. UUID cũ khác payload trả `409`. Mọi thiết bị và mọi tin của direct dùng lại phiên đã khởi tạo; đăng nhập, reload và reconnect chỉ khôi phục khóa, không đổi phiên.
+Tin được lưu trước khi phát realtime. WebSocket bao gồm các thiết bị của sender; client gộp UUID và lấy bù REST khi thiếu tin.
 
-ID epoch, các bảng epoch/backup và API danh sách vẫn được giữ để đọc lịch sử tương thích đã có. Giao diện và API khởi tạo không hỗ trợ thay phiên đang dùng.
+```mermaid
+sequenceDiagram
+    participant C as Browser
+    participant A as API / PostgreSQL
+    participant R as Redis Stream
+    participant G as Gateway
+    C->>A: POST messages với UUID và payload
+    A->>A: Kiểm tra quyền, khóa thread, tăng seq, commit
+    A->>R: message.created và snapshot recipient_ids
+    R->>G: XREADGROUP
+    G-->>C: WebSocket tới mọi kết nối của các bên
+    G->>R: XACK sau xử lý
+    A-->>C: Message đã lưu
+```
 
-Account keys/SK ở RAM sau khi mở vault. `sessionStorage` giữ JWT, username, user UUID và `vault_key` cho reload cùng phiên; đăng xuất xóa chúng. `localStorage` chỉ giữ outbox theo UUID với context/ciphertext/body gửi lại, không lưu plaintext/private keys/SK. Nếu storage không khả dụng, outbox ở RAM; lịch sử đã commit vẫn phục hồi từ server khi đăng nhập lại.
+Thay đổi thành viên nhóm và system message dùng chung transaction và thứ tự `seq` với tin text.
 
-Đối chiếu UUID/fingerprint của peer qua kênh đã xác thực. Quên mật khẩu và mất mọi khóa đã mở thì không thể phục hồi lịch sử. Archive khóa phục vụ khôi phục làm giảm bảo vệ từ việc xóa khóa; đây không phải Double Ratchet hay giao thức đã được audit.
+```mermaid
+sequenceDiagram
+    participant C as Thành viên / admin
+    participant A as API / PostgreSQL
+    participant G as Redis / gateway
+    C->>A: Tạo nhóm, thêm, xóa hoặc rời
+    A->>A: Kiểm tra role và cập nhật membership
+    A->>A: Tạo system message, commit
+    A->>G: message.created tại seq của system message
+    G-->>C: Realtime, client tải lại summary / members
+```
 
-## Nhóm, lịch sử và realtime
-
-- Nhóm dùng `plaintext`, tin dài 1–1000 ký tự Unicode, tối đa 100 thành viên. Admin thêm/xóa người khác; mọi thành viên được rời. Lịch sử chỉ thuộc các khoảng membership. Tạo nhóm chưa có idempotency key; lỗi sau commit phải đối chiếu trước khi tạo lại.
-- Lịch sử mặc định 30 tin, tối đa 100, trả `seq DESC` và `next_cursor`; client hiển thị tăng dần. Unread đếm tin của người khác sau read marker trong membership hiện tại; marker chỉ tăng.
-- Event gửi tới toàn bộ snapshot membership, **kể cả sender**, để các thiết bị của sender thấy tin mới. `recipient_id` trên WS là user nhận delivery; trong encrypted envelope là peer mật mã. Client gộp UUID và lấy bù REST.
-- Publish lỗi sau DB commit trả `503`; event có thể trùng. Chưa có transactional outbox ở backend. `XACK` không xác nhận đã giao/đọc; gateway hiện hỗ trợ một instance.
+Các bước chi tiết, X3DH và phục hồi nằm trong [tài liệu luồng](docs/project-flows.md).
 
 ## Kiểm tra
 
-Build WASM trước kiểm thử client; Node cần hỗ trợ `fetch` và WebSocket.
+Unit test Go và client fixture không cần dịch vụ đang chạy. Build WASM trước fixture test; fixture dùng crypto Go/WASM thật và API mô phỏng. Phần HTTP thật của bộ client được bỏ qua khi chưa đặt `CHAT_API_TEST_URL`.
 
 ```powershell
-go test ./...
-go build ./...
+make wasm
+make test
+make build
 go vet ./...
 node --test web/e2ee-client.test.cjs
 ```
 
-Kiểm thử client dùng Go/WASM thật với API fixture; phần HTTP thật được bật riêng. Sau migration, chạy trên PostgreSQL/Redis local của dự án:
+Integration Go cần PostgreSQL/Redis local và schema đã migrate; bài test tự tạo HTTP server nên không cần tiến trình API/gateway đang chạy:
 
 ```powershell
 $env:CHAT_API_INTEGRATION = '1'
 go test ./internal/route -count=1
 Remove-Item Env:CHAT_API_INTEGRATION
+```
 
-# API và gateway phải đang chạy cho bước này.
+Integration client cần cả PostgreSQL, Redis, API và gateway đang chạy:
+
+```powershell
 $env:CHAT_API_TEST_URL = 'http://localhost:8080'
 node --test web/e2ee-client.test.cjs
 Remove-Item Env:CHAT_API_TEST_URL
 ```
 
-Các bài tích hợp tạo fixture trong database phát triển: auth/vault, khởi tạo phiên đồng thời và dùng lại phiên cố định, từ chối đề xuất thay thế bằng `409`, nhiều thiết bị, recipient offline, khôi phục lịch sử từ client trống, retry/ACK, Redis và bản sao sender qua WS. Có thể [reset](#reset-dữ-liệu-local) sau kiểm tra.
+Các bài tích hợp tạo tài khoản/nhóm thử trong database phát triển. Chúng kiểm tra khởi tạo đồng thời, phiên cố định, nhiều thiết bị, recipient offline, khôi phục từ client trống, retry cùng UUID/seq và HTTP/Redis/WebSocket. Có thể dùng [reset tùy chọn](#reset-dữ-liệu-local-tùy-chọn) sau kiểm thử.
+
+Kiểm tra nhanh trên giao diện:
+
+1. A/B đăng ký ở hai profile, mở direct và gửi hai chiều; reload và đăng nhập B bằng mật khẩu trên profile mới để đọc lại cả tin gửi/nhận.
+2. A tạo nhóm với B; thêm, xóa rồi thêm lại B. B chỉ đọc lịch sử thuộc các lần tham gia; khi admin rời, thành viên còn lại sớm nhất được chuyển quyền nếu cần.
+3. Ngắt mạng B, gửi từ A rồi nối lại; tin thiếu được lấy bù, không lặp UUID. Khởi động lại gateway để kiểm tra reconnect.
+4. Mở hai tab B; đọc thread ở tab đang hiển thị và ở cuối chat, theo dõi unread ở tab còn lại. Direct A nhận summary về marker của B mà không có tin mới.
+5. Đăng ký C sau khi A đã mở web, dùng nút “Làm mới danh sách” để thấy C. Với nhóm, thử tin bị từ chối rồi sửa và gửi; lỗi mạng giữ bản gửi lại cho đến khi được xác nhận.
 
 ## Tài liệu
 
-- [ERD](docs/chat-api-erd.md), [luồng xử lý](docs/request-flow.md), [luồng E2EE](docs/e2ee-sequence.md), [thiết kế phục hồi](docs/e2ee-next-design.md).
-- [ADR 001: gateway](docs/adr/001-gateway-and-stream.md), [ADR 002: unread](docs/adr/002-unread-count.md), [ADR 003: thứ tự tin](docs/adr/003-message-order.md), [ADR 004: thiết kế E2EE cũ](docs/adr/004-e2ee-without-double-ratchet.md), [ADR 005: E2EE có thể khôi phục](docs/adr/005-recoverable-e2ee-sessions.md).
+Đọc theo thứ tự:
+
+1. [Luồng dự án](docs/project-flows.md): kiến trúc, nghiệp vụ, realtime, E2EE và dữ liệu client.
+2. [ERD](docs/chat-api-erd.md): schema, quan hệ và ràng buộc.
+3. Các quyết định: [ADR 001 — gateway/Stream](docs/adr/001-gateway-and-stream.md), [ADR 002 — unread/read marker](docs/adr/002-unread-count.md), [ADR 003 — thứ tự/retry](docs/adr/003-message-order.md), [ADR 005 — E2EE và phục hồi](docs/adr/005-recoverable-e2ee-sessions.md).
+4. [ADR 004](docs/adr/004-e2ee-without-double-ratchet.md) chỉ ghi lại thiết kế E2EE đã được thay thế.

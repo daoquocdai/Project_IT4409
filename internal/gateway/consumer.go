@@ -11,6 +11,8 @@ import (
 	"time"
 
 	messageevent "github.com/daoquocdai/chat-api/internal/module/message/event"
+	threadevent "github.com/daoquocdai/chat-api/internal/module/thread/event"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -102,8 +104,15 @@ func (c *Consumer) handleStreams(ctx context.Context, streams []redis.XStream) e
 			if err != nil {
 				// A poison entry cannot be delivered; avoid a permanent pending loop.
 				c.logger.Printf("discard invalid stream entry id=%s: %v", entry.ID, err)
-			} else if err := c.hub.Dispatch(event); err != nil {
-				return fmt.Errorf("queue entry id=%s: %w", entry.ID, err)
+			} else {
+				if event.threadUpdated != nil {
+					err = c.hub.DispatchThreadUpdated(*event.threadUpdated)
+				} else {
+					err = c.hub.Dispatch(event.messageCreated)
+				}
+				if err != nil {
+					return fmt.Errorf("queue entry id=%s: %w", entry.ID, err)
+				}
 			}
 			if err := c.client.XAck(ctx, c.stream, c.group, entry.ID).Err(); err != nil {
 				return fmt.Errorf("ack entry id=%s: %w", entry.ID, err)
@@ -113,7 +122,61 @@ func (c *Consumer) handleStreams(ctx context.Context, streams []redis.XStream) e
 	return nil
 }
 
-func decode(values map[string]interface{}) (messageevent.MessageCreated, error) {
+type decodedEvent struct {
+	messageCreated messageevent.MessageCreated
+	threadUpdated  *threadevent.ThreadUpdated
+}
+
+func decode(values map[string]interface{}) (decodedEvent, error) {
+	typeName, ok := values["event"].(string)
+	if !ok || typeName == "" {
+		return decodedEvent{}, fmt.Errorf("missing event")
+	}
+	switch typeName {
+	case threadevent.ThreadUpdatedType:
+		event, err := decodeThreadUpdated(values)
+		if err != nil {
+			return decodedEvent{}, err
+		}
+		return decodedEvent{threadUpdated: &event}, nil
+	case messageevent.MessageCreatedType:
+		event, err := decodeMessageCreated(values)
+		return decodedEvent{messageCreated: event}, err
+	default:
+		return decodedEvent{}, fmt.Errorf("unsupported event type")
+	}
+}
+
+func decodeThreadUpdated(values map[string]interface{}) (threadevent.ThreadUpdated, error) {
+	threadID, ok := values["thread_id"].(string)
+	if !ok || !validPublicUUID(threadID) {
+		return threadevent.ThreadUpdated{}, fmt.Errorf("invalid thread_id")
+	}
+	text, ok := values["recipient_ids"].(string)
+	var recipients []string
+	if !ok || json.Unmarshal([]byte(text), &recipients) != nil || len(recipients) == 0 {
+		return threadevent.ThreadUpdated{}, fmt.Errorf("invalid recipient_ids")
+	}
+	event := threadevent.ThreadUpdated{ThreadID: threadID}
+	seen := make(map[string]bool, len(recipients))
+	for _, recipientID := range recipients {
+		if !validPublicUUID(recipientID) {
+			return threadevent.ThreadUpdated{}, fmt.Errorf("invalid recipient UUID")
+		}
+		if !seen[recipientID] {
+			event.RecipientIDs = append(event.RecipientIDs, recipientID)
+			seen[recipientID] = true
+		}
+	}
+	return event, nil
+}
+
+func validPublicUUID(value string) bool {
+	id, err := uuid.Parse(value)
+	return err == nil && id != uuid.Nil && id.String() == value
+}
+
+func decodeMessageCreated(values map[string]interface{}) (messageevent.MessageCreated, error) {
 	get := func(key string) (string, error) {
 		value, ok := values[key].(string)
 		if !ok || value == "" {

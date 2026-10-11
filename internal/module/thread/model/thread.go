@@ -7,6 +7,14 @@ type Peer struct {
 	Username   string
 }
 
+// ReadResult is internal transaction data, returned only after the marker commits.
+// PeerExternalID is empty for a group.
+type ReadResult struct {
+	LastReadSeq      int64
+	ThreadExternalID string
+	PeerExternalID   string
+}
+
 type LastMessage struct {
 	Seq              int64
 	SenderExternalID string
