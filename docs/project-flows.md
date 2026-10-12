@@ -10,7 +10,7 @@ Theo dõi một tin nhắn từ lúc gửi đến khi hiển thị, rồi thêm 
 4. [Gửi lại mà không tạo tin trùng](#retry-pending-và-dữ-liệu-client)
 5. [Lấy bù tin khi mất kết nối](#lịch-sử-cache-và-reconnect)
 6. [Đồng bộ trạng thái đọc giữa các tab](#read-marker-unread-và-nhiều-tab)
-7. [Thêm E2EE vào chat 1-1](#e2ee-phiên-cố-định-và-khôi-phục)
+7. [E2EE: mã hóa, giải mã và đồng bộ khóa](#e2ee-phiên-cố-định-và-khôi-phục)
 8. [Đăng ký để tạo và bảo vệ khóa](#đăng-ký)
 9. [Đăng nhập để mở lại khóa và bắt đầu chat](#đăng-nhập-và-vé-websocket)
 
@@ -168,84 +168,236 @@ Marker chỉ tăng; client gửi khi tab đang hiển thị, ở cuối chat và
 
 ## E2EE: phiên cố định và khôi phục
 
-E2EE là mã hóa đầu cuối: A mã hóa trước khi gửi, B giải mã sau khi nhận. Hai bên cần một **khóa phiên chung, gọi là SK**; mỗi tin dẫn xuất một khóa riêng từ SK. Server vẫn xử lý quyền, thứ tự và realtime, nhưng chỉ giữ bản mã và không có SK để giải mã nội dung.
+E2EE bảo vệ **nội dung chat 1-1** từ trình duyệt gửi đến trình duyệt nhận. Trong ví dụ xuyên suốt, A gửi **“Chào B”**, có UUID rút gọn là `m2`. A mã hóa nội dung trước khi gửi; B giải mã sau khi nhận. API, PostgreSQL, Redis và gateway lưu/chuyển tiếp **bản mã**, đồng thời vẫn xử lý quyền, thứ tự tin và realtime.
 
-### Tạo khóa phiên một lần cho A và B
+Để nắm luồng, cần phân biệt **khóa dùng cho cuộc trò chuyện** và **khóa dùng để khôi phục tài khoản**:
 
-Client dùng **X3DH**, cách thỏa thuận khóa từ bộ khóa riêng của mình và khóa công khai của người còn lại. B có thể offline khi A khởi tạo. Backend gọi bản ghi phiên này là **epoch**; SK được bảo vệ trong một **backup** (bản sao khóa đã mã hóa) để dùng lại trên thiết bị khác.
+| Khóa | Cách tạo | Phạm vi và mục đích |
+| --- | --- | --- |
+| **SK — khóa phiên** | X3DH: tính bí mật chung bằng X25519 rồi dẫn xuất bằng HKDF | Chung cho A/B trong một cuộc trò chuyện; làm gốc để tạo khóa từng tin |
+| **MK — khóa tin** | HKDF-SHA256 từ SK và context của tin | Riêng cho một UUID và chiều gửi; trực tiếp mã hóa/giải mã tin |
+| **VK — khóa mở vault** | Argon2id và HKDF từ mật khẩu, salt và username | Riêng từng tài khoản; mở bộ private keys gốc |
+| **BK — khóa backup** | HKDF-SHA256 từ VK với nhãn dành cho backup | Riêng từng tài khoản; mã hóa/mở bản sao SK lưu trên server |
+
+Các khóa trên dài **32 byte**. **Vault** chứa bộ private keys gốc đã mã hóa của tài khoản; **backup** chứa SK đã mã hóa của một cuộc trò chuyện. A/B dùng cùng SK nhưng có VK, BK và backup riêng. Server giữ public keys, dữ liệu mã hóa và metadata; client xử lý nội dung rõ và các khóa bí mật.
+
+**Epoch** là bản ghi phiên khóa của cuộc trò chuyện. **Context** là các ID xác định tin thuộc cuộc trò chuyện, phiên và chiều gửi nào. **AAD** là cách biểu diễn context thành dữ liệu được xác thực cùng bản mã. **Nonce** là giá trị ngẫu nhiên dùng khi mã hóa. **Envelope** là gói JSON mang bản mã và thông tin để giải mã.
+
+Hai sơ đồ đầu giải thích cách dùng khóa: A đã có SK, B lấy SK đúng epoch khi nhận. Sau đó là cách A/B có cùng SK và cách máy mới khôi phục SK.
+
+### 1. Mã hóa khi gửi
+
+**Đầu vào:** nội dung “Chào B”, SK của epoch đã xác nhận, UUID mới `m2` và hai tài khoản A/B. **Đầu ra:** envelope để gửi qua API.
 
 ```mermaid
-sequenceDiagram
-    participant A as Trình duyệt A
-    participant API as API và PostgreSQL
-    A->>API: Mở chat riêng với B
-    API-->>A: Cuộc trò chuyện của cặp A/B
-    Note over A,API: Khi A cần gửi tin đầu tiên
-    A->>API: Tải phiên khóa của cuộc trò chuyện
-    alt Đã có phiên
-        API-->>A: Phiên đã chọn, backup riêng nếu có
-        A->>A: Khôi phục SK của phiên
-    else Chưa có phiên
-        A->>API: Lấy public bundle của B
-        API-->>A: Khóa công khai để khởi tạo X3DH
-        A->>A: Tạo SK, thông tin khởi tạo và backup SK mã hóa
-        A->>API: Lưu đề xuất phiên và backup
-        API->>API: Khóa thread, chọn phiên đầu tiên và commit cùng backup
-        API-->>A: Phiên được server chọn
-        A->>A: Kiểm tra và dùng SK của phiên đã được xác nhận
+flowchart TD
+    subgraph CLIENT["Trình duyệt A — mã hóa"]
+        CTX["Context: thread_id, epoch_id, message_id=m2<br/>sender_id=A, recipient_id=B"] --> AAD["Dựng AAD và nhãn dẫn xuất info_msg"]
+        SK["SK: khóa phiên 32 byte"] --> KDF["HKDF-SHA256<br/>SK + info_msg → MK 32 byte"]
+        AAD --> KDF
+        KDF --> ENC["AES-256-GCM.Seal<br/>MK, nonce, P, AAD → C"]
+        AAD --> ENC
+        P["P: nội dung Chào B dạng UTF-8"] --> ENC
+        N["Nonce: 12 byte ngẫu nhiên"] --> ENC
+        ENC --> ENV["Envelope: epoch, recipient, nonce, ciphertext<br/>Lưu vào outbox cùng UUID m2"]
     end
+    ENV --> API["POST tin m2 qua API<br/>Kiểm tra quyền và envelope"]
+    API --> SAVE["Lưu bản mã, cấp seq<br/>Phát realtime và trả xác nhận gửi"]
 ```
 
-Mỗi direct dùng một phiên cố định trên mọi tab và cả hai chiều. Nếu nhiều client khởi tạo đồng thời, server chọn một phiên; bên thua nhận `409` rồi khôi phục phiên đã chọn. B dùng bộ khóa riêng và thông tin khởi tạo để tính cùng SK. X3DH không chạy lại cho mỗi tin; không có rekey hay Double Ratchet.
+| Bước | Tham số và phương thức | Kết quả |
+| --- | --- | --- |
+| Tạo context/AAD | `thread_id`, `epoch_id`, `message_id`, `sender_id`, `recipient_id`; đóng gói theo thứ tự cố định | AAD gắn tin với đúng cuộc trò chuyện, epoch và chiều A → B |
+| Dẫn xuất khóa tin | HKDF-SHA256: input `SK`, `salt=nil`, `info=nhãn cố định + AAD`, output 32 byte | MK của riêng tin `m2` |
+| Mã hóa nội dung | AES-256-GCM `Seal(MK, nonce, P, AAD)`; nonce ngẫu nhiên 12 byte | C gồm bản mã và tag xác thực 16 byte |
+| Gửi dữ liệu | Body `{message_id, content_format: "e2ee_v2", content}`; `content` là chuỗi JSON envelope | Server lưu/phát bản mã và metadata |
 
-### Gửi và nhận tin đã mã hóa
+Envelope gồm `{version: 2, epoch_id, recipient_id, nonce, ciphertext}`; nonce và ciphertext được biểu diễn bằng **Base64**. Base64 giúp đưa byte vào JSON; AES-GCM thực hiện mã hóa. `P` được trim, kiểm tra 1–1000 ký tự Unicode và không NUL trước khi mã hóa.
 
-A gửi **“Chào B”** với mã `m2`. Bản mã gọi là **ciphertext**; gói gửi chứa bản mã và thông tin phiên gọi là **envelope**. Luồng này thêm mã hóa trước khi gửi và giải mã sau khi nhận vào đường gửi/nhận đã giải thích với nhóm.
+`seq` được server cấp khi lưu, chỉ phục vụ thứ tự tin. Nonce dùng cho AES-GCM; UUID/context tham gia tạo MK. SK và MK được dùng tại client. Nếu cần gửi lại, client dùng đúng UUID và envelope đã giữ trong outbox.
+
+### 2. Giải mã khi nhận
+
+**Đầu vào:** tin `m2`, metadata và envelope từ WebSocket hoặc lịch sử. **Đầu ra:** nội dung “Chào B” sau khi xác thực thành công. B đã đăng nhập và mở vault để có thể khôi phục khóa khi cần.
+
+```mermaid
+flowchart TD
+    IN["Tin m2 từ WebSocket hoặc lịch sử<br/>Metadata + envelope"] --> CHECK["Kiểm tra tin thuộc cuộc trò chuyện<br/>và envelope version=2"]
+    CHECK --> WIRE["Đọc nonce và C từ Base64 trong envelope"]
+    WIRE --> CTX["Dựng context, AAD và info_msg<br/>thread, epoch, m2, sender=A, recipient=B"]
+    CTX --> KEY["Lấy SK đúng epoch_id<br/>từ RAM hoặc khôi phục từ dữ liệu khóa"]
+    KEY --> KDF["HKDF-SHA256<br/>Cùng SK và info_msg → cùng MK"]
+    KDF --> DEC["AES-256-GCM.Open<br/>MK, nonce nhận được, C, AAD → P"]
+    DEC --> VALID{"Tag và nội dung hợp lệ?"}
+    VALID -->|Có| SHOW["Đọc P dạng UTF-8<br/>Hiển thị Chào B"]
+    VALID -->|Không| ERR["Hiển thị lỗi giải mã"]
+```
+
+| Tham số | B lấy từ đâu? | Dùng để làm gì? |
+| --- | --- | --- |
+| `thread_id`, `message_id`, `sender_id` | Metadata của tin; UUID tin ở `id` hoặc `message_id` tùy nguồn | Dựng context của tin đang nhận |
+| `epoch_id`, `recipient_id` | Epoch từ envelope; recipient xác định từ chiều gửi rồi kiểm tra khớp envelope | Chọn SK đúng phiên, hoàn thiện context |
+| `nonce`, `C` | Giải mã Base64 của hai trường trong envelope | Đầu vào AES-GCM `Open`; dùng lại nonce A đã tạo |
+| `SK`, `MK`, `AAD` | Khôi phục SK theo epoch, dựng cùng AAD và chạy cùng HKDF như A | Tạo lại khóa tin và xác thực bản mã |
+
+A/B có cùng **SK + context**, nên dẫn xuất được cùng **MK**. `Open(MK, nonce, C, AAD)` kiểm tra tag và giải mã; client kiểm tra tiếp UTF-8, độ dài và NUL trước khi hiển thị. Tin từ WebSocket và lịch sử dùng chung bước này.
+
+Các tab của A cũng nhận sự kiện và tự giải mã tin A đã gửi. Recipient trong context là **người nhận theo chiều gửi của tin**; `recipient_id` ngoài envelope của sự kiện WebSocket là tài khoản được phát sự kiện. Client chỉ tăng read marker khi các tin đã tải được giải mã/render thành công và thỏa điều kiện đọc đã nêu ở phần trước.
+
+### 3. A và B có cùng khóa phiên như thế nào?
+
+Đây là bước **thỏa thuận khóa**, diễn ra khi cuộc trò chuyện chưa có epoch. A dùng khóa riêng của mình và public bundle của B để tính SK. B dùng khóa riêng của B và **bootstrap** do A lưu để tính lại cùng SK; B có thể offline lúc A khởi tạo.
+
+| Khóa đầu vào X3DH | Vai trò |
+| --- | --- |
+| `IK_A`, `IK_B` | Cặp khóa định danh gốc của A/B; private key nằm trong vault |
+| `SPK_B` | Prekey có chữ ký của B; A kiểm tra chữ ký bằng `IK_B.pub` trước khi dùng |
+| `OPK_B`, nếu còn | Prekey công khai được claim một lần; private key vẫn được giữ trong vault B để khôi phục |
+| `EK_A` | Cặp khóa tạm thời A sinh cho lần khởi tạo; public key đi vào bootstrap, private key được xóa sau khi tạo SK |
 
 ```mermaid
 sequenceDiagram
-    participant A as Trình duyệt A
-    participant S as API, Redis và gateway
-    participant B as Trình duyệt B
-    A->>A: SK, mã tin và hai bên tạo khóa riêng cho m2
-    A->>A: Mã hóa Chào B thành bản mã
-    A->>S: Gửi m2, bản mã và mã phiên
-    S->>S: Kiểm tra quyền, người nhận, phiên và UUID, lưu rồi phát
-    S-->>B: Bản mã m2 qua WebSocket
-    B->>B: Lấy SK, dẫn xuất lại khóa tin
-    B->>B: Giải mã và hiển thị Chào B
+    participant A as Client A
+    participant S as API và PostgreSQL
+    participant B as Client B
+    Note over A: Chưa có epoch, A đã mở vault
+    A->>S: Claim public bundle B cho thread
+    S-->>A: IK_B.pub, SPK_B.pub và chữ ký, OPK_B.pub nếu còn
+    A->>A: Xác minh bundle, sinh EK_A
+    A->>A: X25519 tạo 3 hoặc 4 bí mật DH, HKDF tạo SK
+    A->>A: Tạo bootstrap và bản mã xác nhận khóa từ SK
+    A->>A: Dùng BK_A mã hóa SK thành backup A
+    A->>S: Lưu epoch, bootstrap và backup A
+    S-->>A: Epoch và backup đã commit cùng transaction
+    A->>A: Mở backup trả về, xác minh đúng SK trước khi gửi
+    Note over B: Khi B mở phiên lần đầu, chưa có backup B
+    B->>S: Tải epoch và bootstrap
+    S-->>B: Thông tin khởi tạo của A
+    B->>B: Private keys B + public keys trong bootstrap → cùng SK
+    B->>B: Kiểm tra bản mã xác nhận khóa, dùng BK_B tạo backup B
+    B->>S: Lưu backup riêng của B
+    S-->>B: Backup B đã commit
+    B->>B: Mở bản trả về, kiểm tra khớp SK vừa tính
 ```
 
-**Context** gắn khóa tin với cuộc trò chuyện, epoch, UUID và hai bên gửi/nhận. HKDF thực hiện dẫn xuất khóa; AES-256-GCM mã hóa và kiểm tra dữ liệu. **Envelope** chứa epoch, recipient, nonce và ciphertext. Retry giữ nguyên UUID và envelope.
+**Phương thức:** X25519 tạo các bí mật DH bằng private key của một bên và public key của bên còn lại. Hai bên tính được cùng kết quả; HKDF-SHA256 biến các kết quả đó thành SK 32 byte. Có OPK thì dùng 4 DH, hết OPK thì dùng 3 DH. Các cặp khóa và công thức DH cụ thể nằm ở phần tra cứu bên dưới.
 
-WebSocket vẫn phát tới mọi kết nối của A và B, kể cả các tab của người gửi. Các tab gộp tin và lấy bù như nhóm; direct chỉ tăng marker sau khi giải mã thành công. Thông báo đọc của direct gửi cho cả reader và peer, nên A thấy B đã đọc.
+**Bootstrap** chứa ID phiên, public keys, ID prekey và bản mã của một chuỗi xác nhận cố định. Client dẫn xuất khóa xác nhận từ SK, mở bản mã này rồi kiểm tra đúng chuỗi cố định, qua đó kiểm tra khóa khớp với thông tin epoch. A/B lưu **hai backup riêng cho cùng SK**; BK_A/BK_B được dẫn xuất từ VK của từng tài khoản.
 
-### Đồng bộ khóa để đọc trên máy khác
+Một direct dùng **một epoch cố định cho cả hai chiều và mọi thiết bị**. Khi B trả lời A, SK giữ nguyên, còn context tin đổi thành `sender_id=B`, `recipient_id=A`, nên MK khác. Đăng nhập/reload/reconnect dùng lại epoch đã có.
 
-B đăng nhập trên máy mới và tải được bản mã `m2`. Để đọc nó, máy mới còn phải khôi phục đúng SK của phiên. Vì vậy mỗi bên lưu **backup SK đã mã hóa riêng cho tài khoản của mình**.
+### 4. Đồng bộ khóa trên thiết bị khác
+
+B đăng nhập trên máy mới và muốn đọc lại `m2`. Máy mới cần khôi phục **VK để mở vault**, rồi **BK để mở backup**, từ đó lấy lại **SK** và quay về luồng giải mã ở mục 2. Các thiết bị khôi phục độc lập từ dữ liệu tài khoản trên server.
+
+Mật khẩu tạo một khóa gốc tạm (`Master`); HKDF tách từ Master hai giá trị: **credential** gửi cho server để xác thực đăng nhập và **VK** giữ tại client để mở vault.
 
 ```mermaid
 sequenceDiagram
     participant B as Máy mới của B
-    participant API as API và PostgreSQL
-    B->>API: Tải phiên và backup riêng của B
-    API-->>B: Thông tin khởi tạo, backup nếu đã có
-    alt B đã có backup
-        B->>B: Mở backup bằng khóa bảo vệ của tài khoản
-    else B chưa từng lưu backup
-        B->>B: Khôi phục bộ khóa riêng, tính SK và kiểm tra
-        B->>API: Lưu backup SK mã hóa của B
-        API-->>B: HTTP trả backup đã commit
-        B->>B: Mở bản trả về và so với SK vừa tính
-    end
-    B->>API: Tải lịch sử bản mã
-    API-->>B: m2 và các tin được phép đọc
-    B->>B: Dùng SK để giải mã lịch sử gửi và nhận
+    participant S as HTTP API
+    B->>S: Lấy salt và profile KDF của username
+    S-->>B: Profile đã lưu khi đăng ký
+    B->>B: Mật khẩu + salt → Argon2id → Master
+    B->>B: HKDF với username tách credential và VK_B
+    B->>S: Đăng nhập bằng credential
+    S-->>B: JWT
+    B->>S: Dùng JWT tải vault mã hóa và public bundle gốc
+    S-->>B: Dữ liệu tài khoản
+    B->>B: AES-GCM.Open bằng VK_B → private keys
+    B->>B: HKDF từ VK_B → BK_B
+    B->>S: Tải epoch và backup riêng của B khi cần đọc/gửi
+    S-->>B: Bootstrap và backup B
+    B->>B: AES-GCM.Open bằng BK_B → SK, xác minh epoch
+    Note over B: SK + context của m2 → MK → giải mã Chào B
 ```
 
-Server chỉ trả backup của chính người gọi và giữ bản ghi đầu tiên. HTTP xác nhận lưu backup ở đây khác ACK của Redis ở luồng realtime. Khóa đã mở và SK nằm trong RAM của client.
+| Bước | Tham số đầu vào và phương thức | Đầu ra |
+| --- | --- | --- |
+| Tạo lại khóa tài khoản | Argon2id: mật khẩu UTF-8, salt 16 byte, RAM 65536 KiB, 3 lượt, parallelism 4, output 32 byte; HKDF với username đã chuẩn hóa và hai nhãn khác nhau | Credential để đăng nhập và VK để mở vault |
+| Mở vault | AES-256-GCM `Open(VK, nonce_vault, ciphertext_vault, AAD_vault)`; AAD gắn username, profile KDF và public bundle gốc | Bộ private keys gốc |
+| Tạo khóa backup | HKDF-SHA256: input VK, salt=nil, nhãn dành cho backup, output 32 byte | BK |
+| Mở backup | AES-256-GCM `Open(BK, nonce_backup, ciphertext_backup, AAD_backup)`; AAD gắn owner, thread, epoch và hash bootstrap | SK 32 byte; kiểm tra bản mã xác nhận khóa trước khi dùng |
 
-Để máy mới mở được backup, tài khoản cần bộ khóa gốc và một cách mở lại chúng bằng mật khẩu. Đó là lý do đăng ký và đăng nhập có thêm vault.
+Server chỉ trả backup của **chính tài khoản gọi API**. Sơ đồ mô tả trường hợp B đã có backup. Nếu chưa có, B là recipient của epoch nên dùng private keys trong vault và bootstrap để tính SK như mục 3, lưu backup, rồi mở bản server trả về trước khi sử dụng. Bên khởi tạo cần backup để khôi phục vì private key tạm thời đã xóa.
+
+Client khôi phục SK khi cần đọc/gửi từng cuộc trò chuyện; lịch sử có thể được tải trước khi khóa được mở. Private keys và SK nằm trong RAM của tab; VK còn được giữ trong `sessionStorage` để reload cùng phiên. Việc lưu dữ liệu trình duyệt được trình bày ở phần đăng nhập bên dưới.
+
+### Quy tắc của thiết kế hiện tại
+
+| Tình huống | Cách xử lý |
+| --- | --- |
+| Nhiều client cùng tạo epoch | Server khóa thread, chọn epoch đầu tiên. Đề xuất khác nhận `409` và khôi phục epoch đã chọn trước khi dùng khóa |
+| Nhiều thiết bị cùng lưu backup | Server giữ bản đầu tiên cho `(epoch_id, user_id)`; client mở bản server trả về, xác minh và đối chiếu SK vừa tính |
+| Mất xác nhận gửi | Giữ UUID và envelope trong outbox để retry, gộp tin theo UUID |
+| Giải mã thất bại | Hiển thị lỗi; chờ giải mã/render thành công trước khi tăng read marker |
+
+Dự án dùng phiên cố định, chưa có rekey hay Double Ratchet. Giữ vault và backup giúp khôi phục lịch sử, đồng thời làm tăng phạm vi lịch sử có thể bị lộ khi khóa tài khoản bị lộ. Quên mật khẩu và mất mọi khóa đã mở thì không thể khôi phục; đánh đổi được nêu trong [ADR 005](adr/005-recoverable-e2ee-sessions.md).
+
+<details>
+<summary>Tra cứu kỹ thuật: công thức chính xác, định dạng dữ liệu và code</summary>
+
+**Ký hiệu:** `HKDF(input, salt, info, length)` dùng SHA-256; salt=nil là không truyền salt riêng, length tính bằng byte. `+` nối byte; `\0` là một byte NUL; `UUID(x)` là UUID 16 byte. `Seal/Open` bên dưới là ký hiệu cho AES-256-GCM với key, nonce, nội dung và AAD. Mỗi lần Seal sinh nonce ngẫu nhiên 12 byte; ciphertext kèm tag 16 byte.
+
+**Tin nhắn — [`SealMessage/OpenMessage`](../internal/e2ee/messages.go):**
+
+```text
+AAD_msg = "Mini-Hermes/message/v2\0"
+          + UUID(thread_id) + UUID(epoch_id) + UUID(message_id)
+          + UUID(sender_id) + UUID(recipient_id)
+info_msg = "Mini-Hermes/message-key/v2\0" + AAD_msg
+MK = HKDF(SK, nil, info_msg, 32)
+C  = Seal(MK, nonce, P, AAD_msg)
+P  = Open(MK, nonce, C, AAD_msg)
+```
+
+**X3DH — [`CreateEpoch/OpenEpoch`](../internal/e2ee/epoch.go), [`deriveKey`](../internal/e2ee/crypto.go):** `.priv/.pub` là khóa riêng/công khai X25519 dài 32 byte.
+
+| Bí mật | A tính | B tính |
+| --- | --- | --- |
+| DH1 | `X25519(IK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, IK_A.pub)` |
+| DH2 | `X25519(EK_A.priv, IK_B.pub)` | `X25519(IK_B.priv, EK_A.pub)` |
+| DH3 | `X25519(EK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, EK_A.pub)` |
+| DH4, nếu có OPK | `X25519(EK_A.priv, OPK_B.pub)` | `X25519(OPK_B.priv, EK_A.pub)` |
+
+```text
+IKM = (32 byte 0xff) + DH1 + DH2 + DH3 [+ DH4 nếu có OPK]
+SK  = HKDF(IKM, salt=32 byte 0x00, info="Mini-Hermes/X3DH/v1", length=32)
+AAD_epoch = "Mini-Hermes/key-epoch/v2\0"
+            + UUID(thread_id) + UUID(epoch_id) + UUID(sender_id) + UUID(recipient_id)
+            + Pub(IK_A) + Pub(IK_B) + Pub(EK_A)
+            + uint64BE(signed_prekey_id) + uint64BE(one_time_prekey_id hoặc 0)
+K_confirm = HKDF(SK, nil, "Mini-Hermes/epoch-confirmation-key/v2\0" + AAD_epoch, 32)
+C_epoch   = Seal(K_confirm, nonce_epoch, "Mini-Hermes/epoch-confirmed/v2", AAD_epoch)
+```
+
+`Pub(K) = 0x05 + public key 32 byte`; `uint64BE` là số nguyên 8 byte big-endian. Context phiên được gắn vào AAD xác nhận; SK được dẫn xuất từ các bí mật DH. Client mở C_epoch và so với chuỗi xác nhận cố định để kiểm tra khóa.
+
+Trường `bootstrap` qua HTTP là **chuỗi JSON** có `version=2`, `thread_id`, `epoch_id`, `sender_id`, `recipient_id`, `sender_identity_key`, `recipient_identity_key`, `ephemeral_key`, `signed_prekey_id`, `one_time_prekey_id`, `nonce`, `ciphertext`. Public keys/nonce/ciphertext là Base64. SPK có ID 1 và chữ ký 64 byte; OPK có ID 2–21 hoặc null khi hết. Sender/recipient trong bootstrap giữ vai trò khởi tạo/nhận epoch.
+
+**Tài khoản và backup — [`DeriveCredentials/OpenAccountVault`](../internal/e2ee/account.go), [`EncryptEpochBackup/OpenEpochBackup`](../internal/e2ee/epoch.go):** username được trim và chuyển chữ thường.
+
+```text
+Master     = Argon2id(password, account_salt, iterations=3, memory=65536 KiB,
+                     parallelism=4, length=32)
+credential = Base64(HKDF(Master, nil, "Mini-Hermes/auth-credential/v2\0" + username, 32))
+VK         = HKDF(Master, nil, "Mini-Hermes/account-vault-key/v2\0" + username, 32)
+BK         = HKDF(VK, nil, "Mini-Hermes/epoch-backup-key/v2", 32)
+AAD_vault  = "Mini-Hermes/account-vault/v2\0" + JSON({username, kdf, public_bundle})
+header_digest = SHA256(EncodeEpochHeader(header))
+AAD_backup = "Mini-Hermes/epoch-backup/v2\0"
+             + UUID(owner_id) + UUID(thread_id) + UUID(epoch_id) + header_digest
+C_backup   = Seal(BK, nonce_backup, SK, AAD_backup)
+SK         = Open(BK, nonce_backup, C_backup, AAD_backup)
+```
+
+`public_bundle` gốc có OPK sắp theo key_id; `kdf` là toàn bộ profile đã lưu. Hash header là SHA-256 32 byte của JSON do `EncodeEpochHeader` tạo, gồm cả nonce/ciphertext xác nhận. Owner là một trong hai tài khoản của epoch.
+
+Vault/backup dùng record `{version: 1, nonce, ciphertext}` với nonce/ciphertext Base64; backup có plaintext SK 32 byte và ciphertext 48 byte gồm tag. Client kiểm tra confirmation của epoch sau khi mở backup. [Client E2EE](../web/e2ee.js) điều phối request, cache và khôi phục; [outbox](../web/e2ee-state.js) giữ bản gửi chưa xác nhận.
+
+</details>
+
+Các luồng trên cần bộ khóa gốc và vault có thể mở lại bằng mật khẩu. Phần đăng ký tiếp theo giải thích cách tài khoản tạo và lưu những dữ liệu đó.
 
 ## Đăng ký
 
