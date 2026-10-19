@@ -234,11 +234,14 @@
     }
     _pending(item) {
       const context = item?.context;
+      const attachmentIDs = Array.isArray(item?.attachment_ids) ? item.attachment_ids : [];
+      const body = { message_id: item.message_id, content_format: "e2ee_v2", content: item.content };
+      if (attachmentIDs.length) body.attachment_ids = attachmentIDs;
       assert(uuid(item?.message_id) && item.message_id === context?.message_id &&
         uuid(context.thread_id) && uuid(context.epoch_id) && context.sender_id === this.userID &&
         uuid(context.recipient_id) && context.recipient_id !== this.userID &&
-        typeof item.content === "string" && item.body === JSON.stringify({
-          message_id: item.message_id, content_format: "e2ee_v2", content: item.content }),
+        attachmentIDs.length <= 5 && attachmentIDs.every(uuid) && new Set(attachmentIDs).size === attachmentIDs.length &&
+        typeof item.content === "string" && item.body === JSON.stringify(body),
       "Bản gửi lại trong bộ nhớ không hợp lệ.");
       return item;
     }
@@ -259,8 +262,10 @@
       this.posts.set(item.message_id, request);
       return request;
     }
-    async send(thread, plaintext) {
+    async send(thread, plaintext, attachmentIDs = []) {
       assert(this.canSend(thread), "Chat mã hóa chưa sẵn sàng.");
+      assert(Array.isArray(attachmentIDs) && attachmentIDs.length <= 5 && attachmentIDs.every(uuid) &&
+        new Set(attachmentIDs).size === attachmentIDs.length, "Danh sách tệp đính kèm không hợp lệ.");
       const text = String(plaintext).trim();
       assert([...text].length > 0 && [...text].length <= 1000 && !text.includes("\0"),
         "Tin nhắn cần 1–1000 ký tự và không chứa NUL.");
@@ -276,8 +281,10 @@
       const context = { thread_id: thread.id, epoch_id: epoch.epoch_id, message_id: crypto.randomUUID(),
         sender_id: this.userID, recipient_id: thread.peer.id };
       const sealed = this._crypto("sealMessage", { context, session_key: epoch.session_key, plaintext: text });
+      const body = { message_id: context.message_id, content_format: "e2ee_v2", content: sealed.content };
+      if (attachmentIDs.length) body.attachment_ids = attachmentIDs;
       const item = { message_id: context.message_id, context, content: sealed.content,
-        body: JSON.stringify({ message_id: context.message_id, content_format: "e2ee_v2", content: sealed.content }) };
+        attachment_ids: attachmentIDs, body: JSON.stringify(body) };
       this.outbox.put(item);
       this._notify();
       return this._post(item);

@@ -9,11 +9,70 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chat -d chat_api"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: mini-hermes:local
+    command:
+      - goose
+      - -dir
+      - db/migrations
+      - postgres
+      - postgres://chat:chat@postgres:5432/chat_api?sslmode=disable
+      - up
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: mini-hermes:local
+    build:
+      context: .
+    command: ["mini-hermes-api"]
+    environment: &app-environment
+      MINI_HERMES_DATABASE_URL: postgres://chat:chat@postgres:5432/chat_api?sslmode=disable
+      MINI_HERMES_REDIS_ADDRESS: redis:6379
+      MINI_HERMES_JWT_SECRET: ${MINI_HERMES_JWT_SECRET:-local-development-only-change-before-production-32-bytes}
+      ATTACHMENT_DIR: /data/attachments
+    volumes:
+      - attachment_data:/data/attachments
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gateway:
+    image: mini-hermes:local
+    command: ["mini-hermes-gateway"]
+    environment: *app-environment
+    ports:
+      - "8081:8081"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+  attachment_data:

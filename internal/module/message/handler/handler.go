@@ -31,6 +31,15 @@ type MessageService interface {
 	) (model.Page, error)
 }
 
+type attachmentMessageService interface {
+	SendWithAttachments(context.Context, string, string, string, string, string, []string) (model.Message, bool, error)
+}
+
+type recallMessageService interface {
+	Recall(context.Context, string, string) (model.Recall, bool, error)
+	ListChanges(context.Context, string, int64, int) (model.ChangePage, error)
+}
+
 type Handler struct {
 	service MessageService
 }
@@ -62,14 +71,18 @@ func (h *Handler) Send(c *gin.Context) {
 		return
 	}
 
-	message, created, err := h.service.Send(
-		c.Request.Context(),
-		actorExternalID,
-		c.Param("id"),
-		request.MessageID,
-		request.ContentFormat,
-		request.Content,
-	)
+	var message model.Message
+	var created bool
+	if len(request.AttachmentIDs) > 0 {
+		service, supported := h.service.(attachmentMessageService)
+		if !supported {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		message, created, err = service.SendWithAttachments(c.Request.Context(), actorExternalID, c.Param("id"), request.MessageID, request.ContentFormat, request.Content, request.AttachmentIDs)
+	} else {
+		message, created, err = h.service.Send(c.Request.Context(), actorExternalID, c.Param("id"), request.MessageID, request.ContentFormat, request.Content)
+	}
 	if err != nil {
 		writeError(c, err)
 		return
@@ -108,6 +121,53 @@ func (h *Handler) List(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, dto.ToMessagePageResponse(page))
+}
+
+func (h *Handler) Recall(c *gin.Context) {
+	actorID, ok := authenticatedUserID(c)
+	if !ok || actorID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	service, ok := h.service.(recallMessageService)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+	recall, _, err := service.Recall(c.Request.Context(), actorID, c.Param("id"))
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.ToRecallResponse(recall))
+}
+
+func (h *Handler) Changes(c *gin.Context) {
+	actorID, ok := authenticatedUserID(c)
+	if !ok || actorID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+	after := int64(0)
+	if value := c.Query("after"); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "after must be a non-negative integer"})
+			return
+		}
+		after = parsed
+	}
+	service, ok := h.service.(recallMessageService)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return
+	}
+	page, err := service.ListChanges(c.Request.Context(), actorID, after, 100)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, dto.ToChangePageResponse(page))
 }
 
 func listQuery(c *gin.Context) (*int64, int, error) {
@@ -150,6 +210,7 @@ func writeError(c *gin.Context, err error) {
 		errors.Is(err, model.ErrInvalidThreadID),
 		errors.Is(err, model.ErrMessageIDRequired),
 		errors.Is(err, model.ErrInvalidMessageID),
+		errors.Is(err, model.ErrInvalidAttachments),
 		errors.Is(err, model.ErrInvalidContent),
 		errors.Is(err, model.ErrInvalidContentFormat),
 		errors.Is(err, model.ErrInvalidEnvelope),
@@ -160,12 +221,19 @@ func writeError(c *gin.Context, err error) {
 
 	case errors.Is(err, threadmodel.ErrThreadNotFound):
 		c.JSON(http.StatusNotFound, gin.H{"error": threadmodel.ErrThreadNotFound.Error()})
+	case errors.Is(err, model.ErrMessageNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": model.ErrMessageNotFound.Error()})
 
 	case errors.Is(err, threadmodel.ErrNotParticipant):
 		c.JSON(http.StatusForbidden, gin.H{"error": threadmodel.ErrNotParticipant.Error()})
+	case errors.Is(err, model.ErrRecallForbidden):
+		c.JSON(http.StatusForbidden, gin.H{"error": model.ErrRecallForbidden.Error()})
 
 	case errors.Is(err, model.ErrMessageIDConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": model.ErrMessageIDConflict.Error()})
+
+	case errors.Is(err, model.ErrAttachmentConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": model.ErrAttachmentConflict.Error()})
 
 	case errors.Is(err, model.ErrContentFormatConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": model.ErrContentFormatConflict.Error()})

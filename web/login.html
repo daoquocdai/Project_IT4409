@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập | Mini Hermes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css?v=20261019">
+</head>
+<body class="auth-page" data-auth-page="login">
+  <main class="auth-shell">
+    <a class="brand auth-brand" href="/" aria-label="Mini Hermes — về trang chủ"><span class="brand-mark" aria-hidden="true">H</span><span>Mini Hermes</span></a>
+    <section class="auth-card" aria-labelledby="auth-title">
+      <div class="auth-heading"><p class="kicker">Chào mừng trở lại</p><h1 id="auth-title">Đăng nhập</h1><p>Tiếp tục những cuộc trò chuyện của bạn.</p></div>
+      <p id="notice" class="form-message success" role="status" hidden></p>
+      <p id="error" class="form-message error" role="alert" hidden></p>
+      <form id="login-form">
+        <label for="login-username">Tên tài khoản</label>
+        <input id="login-username" name="username" autocomplete="username" maxlength="50" required autofocus>
+        <label for="login-password">Mật khẩu</label>
+        <input id="login-password" name="password" type="password" autocomplete="current-password" minlength="8" required>
+        <button id="login-button" class="button button-primary auth-submit" type="submit">Đăng nhập</button>
+      </form>
+      <p class="auth-switch">Chưa có tài khoản? <a href="/register">Đăng ký ngay</a></p>
+    </section>
+    <a class="back-home" href="/">← Quay về trang chủ</a>
+  </main>
+  <script src="/wasm_exec.js?v=20261009-v2" defer></script>
+  <script src="/e2ee-wasm.js?v=20261009-v2" defer></script>
+  <script src="/e2ee.js?v=20261009-v2" defer></script>
+  <script src="/auth.js?v=20261019" defer></script>
+</body>
+</html>

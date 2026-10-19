@@ -45,7 +45,8 @@ SELECT
        AND unread_message.sender_id <> mine.user_id) AS unread_count,
     last_message.seq AS last_message_seq,
     last_sender.external_id AS last_message_sender_external_id,
-    last_message.content AS last_message_content,
+    COALESCE(last_message.content, '') AS last_message_content,
+    last_message.recalled_at AS last_message_recalled_at,
     last_message.created_at AS last_message_created_at,
     t.created_at
 FROM threads AS t
@@ -81,7 +82,8 @@ SELECT
        AND unread_message.sender_id <> mine.user_id) AS unread_count,
     last_message.seq AS last_message_seq,
     last_sender.external_id AS last_message_sender_external_id,
-    last_message.content AS last_message_content,
+    COALESCE(last_message.content, '') AS last_message_content,
+    last_message.recalled_at AS last_message_recalled_at,
     last_message.created_at AS last_message_created_at,
     t.created_at
 FROM threads AS t

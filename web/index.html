@@ -3,130 +3,138 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mini-Hermes</title>
-  <link rel="stylesheet" href="/style.css?v=20261011-read-users">
+  <meta name="description" content="Mini Hermes — nhắn tin trực tiếp được mã hóa đầu cuối và trò chuyện nhóm trong một không gian gọn gàng.">
+  <title>Mini Hermes — Kết nối từ một lời chào</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css?v=20261019">
 </head>
-<body>
-  <main class="app">
-    <header class="hero">
-      <div>
-        <p class="eyebrow">Mini-Hermes</p>
-        <h1>Chat trực tiếp và nhóm</h1>
+<body class="marketing-page">
+  <a class="skip-link" href="#main-content">Đi đến nội dung chính</a>
+  <header class="site-header">
+    <nav class="nav container" aria-label="Điều hướng chính">
+      <a class="brand" href="/" aria-label="Mini Hermes — trang chủ">
+        <span class="brand-mark" aria-hidden="true">H</span>
+        <span>Mini Hermes</span>
+      </a>
+      <div class="nav-links" aria-label="Điều hướng trong trang">
+        <a href="#gioi-thieu">Giới thiệu</a>
+        <a href="#tinh-nang">Tính năng</a>
+        <a href="#cach-su-dung">Cách sử dụng</a>
       </div>
-      <button id="logout-button" class="secondary" type="button" hidden>Đăng xuất</button>
-    </header>
+      <div class="nav-actions" data-auth-actions>
+        <a class="button button-ghost" href="/login">Đăng nhập</a>
+        <a class="button button-primary" href="/register">Đăng ký</a>
+      </div>
+    </nav>
+  </header>
 
-    <p id="notice" class="notice" role="status" hidden></p>
-    <p id="error" class="error" role="alert" hidden></p>
+  <main id="main-content">
+    <section id="gioi-thieu" class="hero-section section">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <p class="kicker"><span class="status-dot" aria-hidden="true"></span> Trò chuyện riêng tư, kết nối tức thì</p>
+          <h1>Kết nối mọi người, bắt đầu từ một lời chào.</h1>
+          <p class="hero-description">Mini Hermes giúp bạn nhắn tin trực tiếp được mã hóa đầu cuối và trò chuyện nhóm trong cùng một không gian rõ ràng, dễ sử dụng.</p>
+          <div class="hero-actions">
+            <a class="button button-primary button-large" href="/register">Tạo tài khoản</a>
+            <a class="button button-secondary button-large" href="#tinh-nang">Khám phá tính năng</a>
+          </div>
+          <ul class="trust-list" aria-label="Điểm nổi bật">
+            <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>Mã hóa đầu cuối cho chat trực tiếp</li>
+            <li><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7l-8-4Z"/></svg>Khôi phục khóa an toàn bằng mật khẩu</li>
+          </ul>
+        </div>
 
-    <section id="auth-view" class="auth-grid">
-      <form id="register-form" class="card">
-        <h2>Đăng ký</h2>
-        <label for="register-username">Tên tài khoản</label>
-        <input id="register-username" name="username" autocomplete="username" required>
-
-        <label for="register-password">Mật khẩu</label>
-        <input id="register-password" name="password" type="password" autocomplete="new-password" minlength="8" required>
-
-        <button id="register-button" type="submit">Tạo tài khoản</button>
-      </form>
-
-      <form id="login-form" class="card">
-        <h2>Đăng nhập</h2>
-        <label for="login-username">Tên tài khoản</label>
-        <input id="login-username" name="username" autocomplete="username" required>
-
-        <label for="login-password">Mật khẩu</label>
-        <input id="login-password" name="password" type="password" autocomplete="current-password" required>
-
-        <button id="login-button" type="submit">Đăng nhập</button>
-      </form>
+        <div class="product-preview" aria-label="Mô phỏng giao diện Mini Hermes">
+          <div class="preview-window">
+            <div class="preview-topbar"><span></span><span></span><span></span><strong>Mini Hermes</strong></div>
+            <div class="preview-body">
+              <aside class="preview-sidebar">
+                <div class="preview-profile"><span class="avatar">A</span><span><b>Anh Minh</b><small>Đang hoạt động</small></span></div>
+                <div class="preview-search">Tìm cuộc trò chuyện</div>
+                <div class="preview-contact active"><span class="avatar blue">L</span><span><b>Lan Anh</b><small>Hẹn gặp bạn lúc 9 giờ nhé!</small></span></div>
+                <div class="preview-contact"><span class="avatar violet">N</span><span><b>Nhóm IT4409</b><small>3 tin nhắn mới</small></span></div>
+                <div class="preview-contact"><span class="avatar green">T</span><span><b>Tuấn</b><small>Đã gửi một tin nhắn</small></span></div>
+              </aside>
+              <div class="preview-chat">
+                <div class="preview-chat-head"><span><b>Lan Anh</b><small>Đang hoạt động</small></span><span class="secure-pill">Mã hóa đầu cuối</span></div>
+                <div class="preview-messages">
+                  <p class="bubble received">Chào bạn! Dự án hôm nay thế nào?</p>
+                  <p class="bubble sent">Mọi thứ đang tiến triển rất tốt.</p>
+                  <p class="bubble sent">Hẹn gặp bạn lúc 9 giờ nhé!</p>
+                </div>
+                <div class="preview-composer"><span>Nhập tin nhắn...</span><b aria-hidden="true">→</b></div>
+              </div>
+            </div>
+          </div>
+          <div class="floating-note"><span class="note-icon" aria-hidden="true">✓</span><span><strong>Tin nhắn đã gửi</strong><small>Vừa xong</small></span></div>
+        </div>
+      </div>
     </section>
 
-    <section id="chat-view" class="chat-layout" hidden>
-      <aside class="card sidebar">
-        <div class="session">
-          <span>Đang đăng nhập</span>
-          <strong id="current-username"></strong>
+    <section id="tinh-nang" class="section features-section">
+      <div class="container">
+        <div class="section-heading">
+          <p class="kicker">Tính năng</p>
+          <h2>Mọi thứ bạn cần để giữ liên lạc</h2>
+          <p>Tập trung vào những cuộc trò chuyện quan trọng với trải nghiệm nhanh, gọn và an toàn.</p>
         </div>
-        <section id="e2ee-panel" class="conversation-section" aria-label="Tình trạng gửi tin" hidden>
-          <p id="e2ee-status" role="status" data-status="initializing">Đang chuẩn bị chat...</p>
-          <div id="e2ee-pending" hidden>
-            <p id="e2ee-pending-info" class="key-hint"></p>
-            <div id="e2ee-pending-list" class="e2ee-actions"></div>
-          </div>
-        </section>
-        <section class="conversation-section" aria-labelledby="direct-heading">
-          <h2 id="direct-heading">Chat 1-1</h2>
-          <div id="direct-thread-list" class="peer-list"></div>
-          <button id="refresh-users-button" class="secondary refresh-users" type="button">Làm mới danh sách</button>
-          <div id="new-direct-section">
-            <h3>Mở chat mới</h3>
-            <div id="peer-list" class="peer-list"></div>
-          </div>
-        </section>
-        <section class="conversation-section" aria-labelledby="group-heading">
-          <h2 id="group-heading">Chat nhóm</h2>
-          <div id="group-thread-list" class="peer-list"></div>
-          <form id="group-form">
-            <h3>Tạo nhóm</h3>
-            <label for="group-name">Tên nhóm</label>
-            <input id="group-name" name="name" maxlength="100" required>
-            <label>Thành viên</label>
-            <div id="group-users" class="group-users"></div>
-            <button id="create-group-button" type="submit">Tạo nhóm</button>
-            <button id="recover-group-button" class="secondary" type="button" hidden>Mở lại nhóm đã tạo</button>
-          </form>
-        </section>
-      </aside>
-
-      <section class="card chat">
-        <div class="chat-heading">
-          <div>
-            <span>Cuộc trò chuyện</span>
-            <h2 id="peer-name">Chọn cuộc trò chuyện</h2>
-            <p id="thread-status"></p>
-            <button id="e2ee-decrypt-retry" class="secondary" type="button" hidden>Thử lại</button>
-          </div>
-          <button id="members-button" class="secondary" type="button" hidden>Thành viên</button>
+        <div class="feature-grid">
+          <article class="feature-card">
+            <span class="feature-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"/></svg></span>
+            <h3>Nhắn tin trực tiếp</h3>
+            <p>Bắt đầu cuộc trò chuyện riêng tư, đồng bộ nhiều thiết bị và giữ liên lạc với bạn bè.</p>
+            <span class="feature-meta">Có sẵn · E2EE</span>
+          </article>
+          <article class="feature-card">
+            <span class="feature-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+            <h3>Trò chuyện nhóm</h3>
+            <p>Tạo nhóm, quản lý thành viên và trao đổi cùng nhiều người trong một luồng hội thoại.</p>
+            <span class="feature-meta">Có sẵn</span>
+          </article>
+          <article class="feature-card feature-upcoming">
+            <span class="feature-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.68 2.8a2 2 0 0 1-.45 2.11L8.07 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.32 1.84.55 2.8.68A2 2 0 0 1 22 16.92Z"/></svg></span>
+            <span class="coming-badge">Đang phát triển</span>
+            <h3>Gọi điện trực tuyến</h3>
+            <p>Chuyển từ tin nhắn sang cuộc gọi khi cần trao đổi trực tiếp — tính năng đang được hoàn thiện.</p>
+            <span class="feature-meta">Sắp ra mắt</span>
+          </article>
         </div>
+      </div>
+    </section>
 
-        <section id="members-panel" hidden>
-          <ul id="member-list"></ul>
-          <form id="add-member-form" hidden>
-            <label for="add-member-user">Thêm thành viên</label>
-            <div class="row">
-              <select id="add-member-user" name="user_id"></select>
-              <button id="add-member-button" type="submit">Thêm</button>
-            </div>
-          </form>
-          <button id="leave-button" class="secondary" type="button">Rời nhóm</button>
-        </section>
-
-        <div class="history-actions">
-          <button id="load-older-button" class="secondary" type="button" hidden>Tin cũ hơn</button>
+    <section id="cach-su-dung" class="section steps-section">
+      <div class="container steps-layout">
+        <div class="section-heading align-left">
+          <p class="kicker">Bắt đầu nhanh</p>
+          <h2>Ba bước để bắt đầu cuộc trò chuyện</h2>
+          <p>Không cần cài đặt phức tạp. Tạo tài khoản và kết nối ngay trên trình duyệt.</p>
         </div>
+        <ol class="step-list">
+          <li><span>01</span><div><h3>Tạo tài khoản</h3><p>Chọn tên tài khoản và mật khẩu để Mini Hermes tạo hồ sơ cùng khóa mã hóa.</p></div></li>
+          <li><span>02</span><div><h3>Tìm người để kết nối</h3><p>Làm mới danh sách người dùng và chọn người bạn muốn bắt đầu trò chuyện.</p></div></li>
+          <li><span>03</span><div><h3>Bắt đầu trò chuyện</h3><p>Gửi tin nhắn trực tiếp hoặc tạo nhóm để trao đổi cùng nhiều thành viên.</p></div></li>
+        </ol>
+      </div>
+    </section>
 
-        <div id="history" class="history" aria-live="polite">
-          <p class="empty">Chọn một tài khoản để bắt đầu chat.</p>
-        </div>
-
-        <form id="message-form" class="message-form">
-          <label for="content">Tin nhắn</label>
-          <div class="row">
-            <input id="content" name="content" autocomplete="off" required disabled>
-            <button id="send-button" type="submit" disabled>Gửi</button>
-          </div>
-        </form>
-      </section>
+    <section class="section cta-section">
+      <div class="container cta-card">
+        <div><p class="kicker">Sẵn sàng kết nối?</p><h2>Cuộc trò chuyện tiếp theo bắt đầu từ đây.</h2><p>Tạo tài khoản Mini Hermes và gửi lời chào đầu tiên.</p></div>
+        <a class="button button-primary button-large" href="/register">Đăng ký tài khoản</a>
+      </div>
     </section>
   </main>
 
-  <script src="/wasm_exec.js?v=20261009-v2" defer></script>
-  <script src="/e2ee-wasm.js?v=20261009-v2" defer></script>
-  <script src="/e2ee-state.js?v=20261009-v2" defer></script>
-  <script src="/e2ee.js?v=20261009-v2" defer></script>
-  <script src="/realtime-core.js?v=20261009-v2" defer></script>
-  <script src="/app.js?v=20261011-read-users" defer></script>
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">H</span><span>Mini Hermes</span></a>
+      <p>Đồ án ứng dụng trò chuyện realtime với Go, WebSocket và mã hóa đầu cuối.</p>
+      <p>© 2026 Mini Hermes</p>
+    </div>
+  </footer>
+  <script src="/landing.js?v=20261019" defer></script>
 </body>
 </html>

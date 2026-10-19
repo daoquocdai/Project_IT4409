@@ -3,11 +3,14 @@ package repository
 import (
 	"context"
 	"errors"
+	"sort"
+	"time"
 
 	"github.com/daoquocdai/chat-api/internal/database/sqlc"
 	"github.com/daoquocdai/chat-api/internal/e2ee"
 	"github.com/daoquocdai/chat-api/internal/module/message/model"
 	threadmodel "github.com/daoquocdai/chat-api/internal/module/thread/model"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -27,6 +30,26 @@ func (r *PostgresRepository) Send(
 	threadExternalID string,
 	senderID int64,
 	messageID, contentFormat, content string,
+) (model.Message, bool, error) {
+	return r.send(ctx, threadExternalID, senderID, messageID, contentFormat, content, nil)
+}
+
+func (r *PostgresRepository) SendWithAttachments(
+	ctx context.Context,
+	threadExternalID string,
+	senderID int64,
+	messageID, contentFormat, content string,
+	attachmentIDs []string,
+) (model.Message, bool, error) {
+	return r.send(ctx, threadExternalID, senderID, messageID, contentFormat, content, attachmentIDs)
+}
+
+func (r *PostgresRepository) send(
+	ctx context.Context,
+	threadExternalID string,
+	senderID int64,
+	messageID, contentFormat, content string,
+	attachmentIDs []string,
 ) (model.Message, bool, error) {
 	threadID, err := parseUUID(threadExternalID, model.ErrInvalidThreadID)
 	if err != nil {
@@ -68,10 +91,15 @@ func (r *PostgresRepository) Send(
 				existing.Content != content {
 				return model.ErrMessageIDConflict
 			}
+			if matches, matchErr := messageAttachmentsMatch(ctx, tx, existing.ID, attachmentIDs); matchErr != nil {
+				return matchErr
+			} else if !matches {
+				return model.ErrMessageIDConflict
+			}
 			result = messageFromValues(
 				existing.ID, existing.ExternalID, existing.ThreadExternalID,
 				existing.SenderExternalID, existing.Seq, existing.ThreadKind, existing.Kind,
-				existing.ContentFormat, existing.Content, existing.CreatedAt,
+				existing.ContentFormat, existing.Content, existing.CreatedAt, existing.RecalledAt,
 			)
 			return nil
 		}
@@ -105,17 +133,29 @@ func (r *PostgresRepository) Send(
 			Seq:               seq,
 			ContentFormat:     contentFormat,
 			EpochID:           epochID,
-			Content:           content,
+			Content:           pgtype.Text{String: content, Valid: true},
 		})
 		if err != nil {
 			return err
+		}
+		if len(attachmentIDs) > 0 {
+			command, updateErr := tx.Exec(ctx, `
+				UPDATE attachments SET message_id=$1, status='attached'
+				WHERE id=ANY($2::uuid[]) AND thread_id=$3 AND uploader_id=$4
+				  AND message_id IS NULL AND status='pending'`, message.ID, attachmentIDs, thread.ID, senderID)
+			if updateErr != nil {
+				return updateErr
+			}
+			if command.RowsAffected() != int64(len(attachmentIDs)) {
+				return model.ErrAttachmentConflict
+			}
 		}
 
 		created = true
 		result = messageFromValues(
 			message.ID, message.ExternalID, message.ThreadExternalID,
 			message.SenderExternalID, message.Seq, message.ThreadKind, message.Kind,
-			message.ContentFormat, message.Content, message.CreatedAt,
+			message.ContentFormat, message.Content, message.CreatedAt, message.RecalledAt,
 		)
 		return nil
 	})
@@ -127,6 +167,36 @@ func (r *PostgresRepository) Send(
 	}
 
 	return result, created, nil
+}
+
+func messageAttachmentsMatch(ctx context.Context, tx pgx.Tx, messageID int64, requested []string) (bool, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text FROM attachments WHERE message_id=$1 ORDER BY id`, messageID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	var stored []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		stored = append(stored, id)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	want := append([]string(nil), requested...)
+	sort.Strings(want)
+	if len(stored) != len(want) {
+		return false, nil
+	}
+	for i := range stored {
+		if stored[i] != want[i] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // The server binds a message to its thread/epoch and peer, without decrypting.
@@ -209,7 +279,7 @@ func (r *PostgresRepository) List(
 		messages[i] = messageFromValues(
 			row.ID, row.ExternalID, row.ThreadExternalID,
 			row.SenderExternalID, row.Seq, row.ThreadKind, row.Kind,
-			row.ContentFormat, row.Content, row.CreatedAt,
+			row.ContentFormat, row.Content, row.CreatedAt, row.RecalledAt,
 		)
 	}
 
@@ -246,8 +316,13 @@ func messageFromValues(
 	externalID, threadExternalID, senderExternalID pgtype.UUID,
 	seq int64,
 	threadKind, kind, contentFormat, content string,
-	createdAt pgtype.Timestamptz,
+	createdAt, recalledAt pgtype.Timestamptz,
 ) model.Message {
+	var recalled *time.Time
+	if recalledAt.Valid {
+		value := recalledAt.Time
+		recalled = &value
+	}
 	return model.Message{
 		ID:               id,
 		ExternalID:       externalID.String(),
@@ -258,6 +333,7 @@ func messageFromValues(
 		Kind:             kind,
 		ContentFormat:    contentFormat,
 		Content:          content,
+		RecalledAt:       recalled,
 		CreatedAt:        createdAt.Time,
 	}
 }
@@ -267,6 +343,105 @@ func isExternalIDUniqueViolation(err error) bool {
 	return errors.As(err, &postgresError) &&
 		postgresError.Code == "23505" &&
 		postgresError.ConstraintName == "messages_external_id_key"
+}
+
+func (r *PostgresRepository) Recall(ctx context.Context, actorID int64, messageExternalID string) (model.Recall, bool, error) {
+	messageID, err := parseUUID(messageExternalID, model.ErrInvalidMessageID)
+	if err != nil {
+		return model.Recall{}, false, err
+	}
+	var result model.Recall
+	created := false
+	err = pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var internalMessageID, internalThreadID, senderID, messageSeq int64
+		var recalledAt pgtype.Timestamptz
+		err := tx.QueryRow(ctx, `
+			SELECT m.id,m.thread_id,m.sender_id,m.seq,m.recalled_at,t.external_id::text,s.external_id::text,
+			       COALESCE(e.id::text,''),COALESCE(e.change_seq,0)
+			FROM messages m JOIN threads t ON t.id=m.thread_id JOIN users s ON s.id=m.sender_id
+			LEFT JOIN message_change_events e ON e.message_id=m.id AND e.event_type='message.recalled'
+			WHERE m.external_id=$1 FOR UPDATE OF m`, messageID).
+			Scan(&internalMessageID, &internalThreadID, &senderID, &messageSeq, &recalledAt, &result.ThreadID, &result.SenderID, &result.EventID, &result.ChangeSeq)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return model.ErrMessageNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if senderID != actorID {
+			return model.ErrRecallForbidden
+		}
+		result.MessageID = messageExternalID
+		result.MessageSeq = messageSeq
+		if recalledAt.Valid {
+			result.RecalledAt = recalledAt.Time
+			return nil
+		}
+		if err := tx.QueryRow(ctx, `UPDATE messages SET recalled_at=NOW(),content=NULL WHERE id=$1 RETURNING recalled_at`, internalMessageID).Scan(&result.RecalledAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE attachments SET status='deleting',message_id=NULL WHERE message_id=$1 AND status='attached'`, internalMessageID); err != nil {
+			return err
+		}
+		result.EventID = uuid.NewString()
+		if err := tx.QueryRow(ctx, `INSERT INTO message_change_events(id,event_type,message_id,thread_id,recalled_at) VALUES($1,'message.recalled',$2,$3,$4) RETURNING change_seq`, result.EventID, internalMessageID, internalThreadID, result.RecalledAt).Scan(&result.ChangeSeq); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	return result, created, err
+}
+
+func (r *PostgresRepository) ListChanges(ctx context.Context, actorID int64, after int64, limit int) (model.ChangePage, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT e.id::text,e.change_seq,m.external_id::text,t.external_id::text,s.external_id::text,m.seq,e.recalled_at
+		FROM message_change_events e JOIN messages m ON m.id=e.message_id JOIN threads t ON t.id=e.thread_id JOIN users s ON s.id=m.sender_id
+		WHERE e.change_seq>$1 AND EXISTS (SELECT 1 FROM participants p WHERE p.thread_id=e.thread_id AND p.user_id=$2 AND p.joined_seq<=m.seq AND (p.left_seq IS NULL OR p.left_seq>=m.seq))
+		ORDER BY e.change_seq LIMIT $3`, after, actorID, limit)
+	if err != nil {
+		return model.ChangePage{}, err
+	}
+	defer rows.Close()
+	page := model.ChangePage{Changes: []model.Recall{}, NextCursor: after}
+	for rows.Next() {
+		var change model.Recall
+		if err := rows.Scan(&change.EventID, &change.ChangeSeq, &change.MessageID, &change.ThreadID, &change.SenderID, &change.MessageSeq, &change.RecalledAt); err != nil {
+			return model.ChangePage{}, err
+		}
+		page.Changes = append(page.Changes, change)
+		page.NextCursor = change.ChangeSeq
+	}
+	return page, rows.Err()
+}
+
+func (r *PostgresRepository) PendingRecallEvents(ctx context.Context, limit int) ([]model.Recall, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT e.id::text,e.change_seq,m.external_id::text,t.external_id::text,s.external_id::text,m.seq,e.recalled_at,
+		       ARRAY_AGG(DISTINCT recipient.external_id::text ORDER BY recipient.external_id::text)
+		FROM message_change_events e JOIN messages m ON m.id=e.message_id JOIN threads t ON t.id=e.thread_id JOIN users s ON s.id=m.sender_id
+		JOIN participants p ON p.thread_id=e.thread_id AND p.joined_seq<=m.seq AND (p.left_seq IS NULL OR p.left_seq>=m.seq)
+		JOIN users recipient ON recipient.id=p.user_id
+		WHERE e.published_at IS NULL GROUP BY e.id,e.change_seq,m.external_id,t.external_id,s.external_id,m.seq,e.recalled_at
+		ORDER BY e.change_seq LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []model.Recall
+	for rows.Next() {
+		var event model.Recall
+		if err := rows.Scan(&event.EventID, &event.ChangeSeq, &event.MessageID, &event.ThreadID, &event.SenderID, &event.MessageSeq, &event.RecalledAt, &event.RecipientIDs); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func (r *PostgresRepository) MarkRecallPublished(ctx context.Context, eventID string) error {
+	_, err := r.pool.Exec(ctx, `UPDATE message_change_events SET published_at=COALESCE(published_at,NOW()) WHERE id=$1::uuid`, eventID)
+	return err
 }
 
 // MembershipVersionAtSequence resolves the immutable snapshot key after commit.

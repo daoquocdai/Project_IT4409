@@ -11,14 +11,15 @@ import (
 )
 
 type Config struct {
-	HTTPAddress string        `yaml:"http_address"`
-	WSAddress   string        `yaml:"ws_address"`
-	WSPublicURL string        `yaml:"ws_public_url"`
-	WSOrigins   []string      `yaml:"ws_allowed_origins"`
-	WSTicketTTL time.Duration `yaml:"ws_ticket_ttl"`
-	DatabaseURL string        `yaml:"database_url"`
-	Auth        AuthConfig    `yaml:"auth"`
-	Redis       RedisConfig   `yaml:"redis"`
+	HTTPAddress   string        `yaml:"http_address"`
+	WSAddress     string        `yaml:"ws_address"`
+	WSPublicURL   string        `yaml:"ws_public_url"`
+	WSOrigins     []string      `yaml:"ws_allowed_origins"`
+	WSTicketTTL   time.Duration `yaml:"ws_ticket_ttl"`
+	DatabaseURL   string        `yaml:"database_url"`
+	AttachmentDir string        `yaml:"attachment_dir"`
+	Auth          AuthConfig    `yaml:"auth"`
+	Redis         RedisConfig   `yaml:"redis"`
 }
 
 // LoadGateway reads the shared config without requiring a PostgreSQL URL or API port.
@@ -32,6 +33,7 @@ func LoadGateway(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	applyEnvironment(&cfg)
 	applyWSDefaults(&cfg)
 	if cfg.WSAddress == cfg.HTTPAddress {
 		return Config{}, errors.New("ws_address must differ from http_address")
@@ -65,6 +67,7 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
+	applyEnvironment(&cfg)
 	applyWSDefaults(&cfg)
 
 	if cfg.HTTPAddress == "" {
@@ -79,6 +82,26 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyEnvironment lets containers override the hostnames and secrets from the
+// development YAML without generating or modifying a config file at runtime.
+func applyEnvironment(cfg *Config) {
+	if value := strings.TrimSpace(os.Getenv("MINI_HERMES_DATABASE_URL")); value != "" {
+		cfg.DatabaseURL = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MINI_HERMES_REDIS_ADDRESS")); value != "" {
+		cfg.Redis.Address = value
+	}
+	if value := os.Getenv("MINI_HERMES_REDIS_PASSWORD"); value != "" {
+		cfg.Redis.Password = value
+	}
+	if value := strings.TrimSpace(os.Getenv("MINI_HERMES_JWT_SECRET")); value != "" {
+		cfg.Auth.JWTSecret = value
+	}
+	if value := strings.TrimSpace(os.Getenv("ATTACHMENT_DIR")); value != "" {
+		cfg.AttachmentDir = value
+	}
 }
 
 func validateShared(cfg Config) error {
@@ -111,6 +134,9 @@ func validateShared(cfg Config) error {
 }
 
 func applyWSDefaults(cfg *Config) {
+	if strings.TrimSpace(cfg.AttachmentDir) == "" {
+		cfg.AttachmentDir = "data/attachments"
+	}
 	if strings.TrimSpace(cfg.WSAddress) == "" {
 		cfg.WSAddress = ":8081"
 	}

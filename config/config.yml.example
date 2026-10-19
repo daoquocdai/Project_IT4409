@@ -4,6 +4,7 @@ ws_public_url: "ws://localhost:8081/ws"
 ws_allowed_origins: ["localhost:8080", "127.0.0.1:8080"]
 ws_ticket_ttl: 30s
 database_url: "postgres://chat:chat@localhost:5432/chat_api?sslmode=disable"
+attachment_dir: "data/attachments"
 auth:
   jwt_secret: "replace-with-a-long-random-secret"
   jwt_ttl: 24h

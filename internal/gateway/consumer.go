@@ -107,6 +107,8 @@ func (c *Consumer) handleStreams(ctx context.Context, streams []redis.XStream) e
 			} else {
 				if event.threadUpdated != nil {
 					err = c.hub.DispatchThreadUpdated(*event.threadUpdated)
+				} else if event.messageRecalled != nil {
+					err = c.hub.DispatchRecall(*event.messageRecalled)
 				} else {
 					err = c.hub.Dispatch(event.messageCreated)
 				}
@@ -123,8 +125,9 @@ func (c *Consumer) handleStreams(ctx context.Context, streams []redis.XStream) e
 }
 
 type decodedEvent struct {
-	messageCreated messageevent.MessageCreated
-	threadUpdated  *threadevent.ThreadUpdated
+	messageCreated  messageevent.MessageCreated
+	messageRecalled *messageevent.MessageRecalled
+	threadUpdated   *threadevent.ThreadUpdated
 }
 
 func decode(values map[string]interface{}) (decodedEvent, error) {
@@ -142,9 +145,69 @@ func decode(values map[string]interface{}) (decodedEvent, error) {
 	case messageevent.MessageCreatedType:
 		event, err := decodeMessageCreated(values)
 		return decodedEvent{messageCreated: event}, err
+	case messageevent.MessageRecalledType:
+		event, err := decodeMessageRecalled(values)
+		return decodedEvent{messageRecalled: &event}, err
 	default:
 		return decodedEvent{}, fmt.Errorf("unsupported event type")
 	}
+}
+
+func decodeMessageRecalled(values map[string]interface{}) (messageevent.MessageRecalled, error) {
+	get := func(key string) (string, error) {
+		value, ok := values[key].(string)
+		if !ok || value == "" {
+			return "", fmt.Errorf("missing %s", key)
+		}
+		return value, nil
+	}
+	var event messageevent.MessageRecalled
+	var err error
+	if event.EventID, err = get("event_id"); err != nil || !validPublicUUID(event.EventID) {
+		return event, fmt.Errorf("invalid event_id")
+	}
+	if event.MessageID, err = get("message_id"); err != nil || !validPublicUUID(event.MessageID) {
+		return event, fmt.Errorf("invalid message_id")
+	}
+	if event.ThreadID, err = get("thread_id"); err != nil || !validPublicUUID(event.ThreadID) {
+		return event, fmt.Errorf("invalid thread_id")
+	}
+	if event.SenderID, err = get("sender_id"); err != nil || !validPublicUUID(event.SenderID) {
+		return event, fmt.Errorf("invalid sender_id")
+	}
+	changeText, err := get("change_seq")
+	if err != nil {
+		return event, err
+	}
+	event.ChangeSeq, err = strconv.ParseInt(changeText, 10, 64)
+	if err != nil || event.ChangeSeq <= 0 {
+		return event, fmt.Errorf("invalid change_seq")
+	}
+	recalledText, err := get("recalled_at")
+	if err != nil {
+		return event, err
+	}
+	event.RecalledAt, err = time.Parse(time.RFC3339Nano, recalledText)
+	if err != nil {
+		return event, fmt.Errorf("invalid recalled_at")
+	}
+	recipientsText, ok := values["recipient_ids"].(string)
+	if !ok || json.Unmarshal([]byte(recipientsText), &event.RecipientIDs) != nil || len(event.RecipientIDs) == 0 {
+		return event, fmt.Errorf("invalid recipient_ids")
+	}
+	seen := map[string]bool{}
+	unique := event.RecipientIDs[:0]
+	for _, id := range event.RecipientIDs {
+		if !validPublicUUID(id) {
+			return event, fmt.Errorf("invalid recipient UUID")
+		}
+		if !seen[id] {
+			unique = append(unique, id)
+			seen[id] = true
+		}
+	}
+	event.RecipientIDs = unique
+	return event, nil
 }
 
 func decodeThreadUpdated(values map[string]interface{}) (threadevent.ThreadUpdated, error) {

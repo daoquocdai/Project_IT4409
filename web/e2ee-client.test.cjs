@@ -50,7 +50,7 @@ function browserFixture(fetchAPI, cache = new Map()) {
         ? this.children.filter((item) => item.dataset?.seq).at(-1) : null; },
       getBoundingClientRect() { return { top: 0, bottom: 100, left: 0, right: 100 }; } };
   }
-  const nodes = new Map([...fs.readFileSync(path.join(__dirname, "index.html"), "utf8")
+  const nodes = new Map([...fs.readFileSync(path.join(__dirname, "app.html"), "utf8")
     .matchAll(/<([a-z][a-z0-9]*)\b[^>]*\bid="([^"]+)"/g)].map((match) => [match[2], element(match[1])]));
   for (const name of ["register", "login"]) nodes.get(name + "-form").elements = {
     username: nodes.get(name + "-username"), password: nodes.get(name + "-password") };
@@ -578,6 +578,34 @@ test("a queued read notification cannot refresh a replacement login session", as
   assert.equal(ui.calls.length, 0);
 });
 
+test("recall tombstones win both before and after a delayed message event", () => {
+  const ui = frontendFixture(async () => apiResponse({}));
+  const first = { type: "message.created", recipient_id: A, message_id: crypto.randomUUID(),
+    thread_id: T, sender_id: A, seq: 1, kind: "text", content_format: "plaintext",
+    content: "must disappear", created_at: "2026-10-19T10:00:00Z" };
+  ui.socketEvent(first);
+  ui.socketEvent({ type: "message.recalled", recipient_id: A, event_id: crypto.randomUUID(),
+    change_seq: 1, message_id: first.message_id, thread_id: T, sender_id: A,
+    recalled_at: "2026-10-19T10:01:00Z" });
+  ui.context.fixtureMessageID = first.message_id;
+  assert.equal(ui.run(`(() => { const seq = state.currentCache.messageIDs.get(fixtureMessageID);
+    const message = state.currentCache.messages.get(seq); return JSON.stringify([message.content, message.recalled_at, state.recallCursor]); })()`),
+  JSON.stringify(["", "2026-10-19T10:01:00Z", 1]));
+
+  const delayedID = crypto.randomUUID();
+  ui.socketEvent({ type: "message.recalled", recipient_id: A, event_id: crypto.randomUUID(),
+    change_seq: 2, message_id: delayedID, thread_id: T, sender_id: B,
+    recalled_at: "2026-10-19T10:02:00Z" });
+  ui.socketEvent({ type: "message.created", recipient_id: A, message_id: delayedID,
+    thread_id: T, sender_id: B, seq: 2, kind: "text", content_format: "plaintext",
+    content: "late payload", created_at: "2026-10-19T10:00:30Z" });
+  ui.context.fixtureMessageID = delayedID;
+  assert.equal(ui.run(`(() => { const seq = state.currentCache.messageIDs.get(fixtureMessageID);
+    const message = state.currentCache.messages.get(seq); return JSON.stringify([message.content, message.recalled_at,
+      state.currentCache.summary.last_message.content, state.currentCache.summary.last_message.recalled_at]); })()`),
+  JSON.stringify(["", "2026-10-19T10:02:00Z", "", "2026-10-19T10:02:00Z"]));
+});
+
 test("read summaries update peer read markers and cannot overwrite a newer local read", async () => {
   let summary;
   const ui = frontendFixture(() => apiResponse([summary]));
@@ -623,7 +651,7 @@ test("refresh users adds accounts, preserves group/member choices and conversati
   second.resolve(apiResponse([...refreshed, { id: "55555555-5555-4555-8555-555555555555", username: "latest account" }]));
   await refresh;
   assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
-  assert.equal(ui.nodes.get("peer-list").children.some((button) => button.textContent === "latest account"), true);
+  assert.equal(ui.nodes.get("peer-list").children.some((button) => button.children[1]?.textContent === "latest account"), true);
   assert.equal(ui.nodes.get("group-users").querySelectorAll("input:checked")[0].value, B);
   assert.equal(ui.nodes.get("add-member-user").value, B);
   assert.equal(ui.nodes.get("add-member-user").options.some((option) => option.textContent === "latest account"), true);
@@ -634,9 +662,9 @@ test("refresh users adds accounts, preserves group/member choices and conversati
   assert.equal(ui.run("state.e2ee"), client);
   assert.equal(ui.run("state.threadID"), T);
   assert.equal(ui.calls.every((call) => call.url === "/users"), true);
-  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
-  assert.ok(html.indexOf('id="refresh-users-button"') < html.indexOf('id="new-direct-section"'),
-    "refresh must stay available even when the new-direct section is hidden");
+  const html = fs.readFileSync(path.join(__dirname, "app.html"), "utf8");
+  assert.ok(html.includes('id="refresh-users-button"') && html.includes('id="refresh-users-button" type="button" hidden'),
+    "the automatic user refresh control keeps a hidden retry target");
 });
 
 test("refresh remains available without peers and drops choices for removed users", async () => {
@@ -648,7 +676,7 @@ test("refresh remains available without peers and drops choices for removed user
   users = [...users, { id: B, username: "bob" }];
   await ui.refresh();
   assert.equal(ui.nodes.get("new-direct-section").hidden, false);
-  assert.equal(ui.nodes.get("peer-list").children[0].textContent, "bob");
+  assert.equal(ui.nodes.get("peer-list").children[0].children[1].textContent, "bob");
   ui.nodes.get("group-users").querySelectorAll("*").find((node) => node.tag === "input").checked = true;
   ui.nodes.get("members-panel").hidden = false;
   ui.run("state.currentCache.members = [fixtureUsers[0]]; renderMembers(state.currentCache);");
@@ -684,7 +712,7 @@ test("user refresh errors restore its button and obsolete responses cannot chang
   await newRequest;
   assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
   assert.equal(ui.run("state.currentUsername"), "new bob");
-  assert.equal(ui.nodes.get("peer-list").children[0].textContent, "new peer");
+  assert.equal(ui.nodes.get("peer-list").children[0].children[1].textContent, "new peer");
 });
 
 test("real HTTP/Redis/WebSocket round trip and password-only history recovery", {

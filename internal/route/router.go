@@ -27,6 +27,8 @@ type ThreadHandler interface {
 type MessageHandler interface {
 	Send(c *gin.Context)
 	List(c *gin.Context)
+	Recall(c *gin.Context)
+	Changes(c *gin.Context)
 }
 
 type WSTicketHandler interface {
@@ -41,6 +43,11 @@ type E2EEHandler interface {
 	Backup(c *gin.Context)
 }
 
+type AttachmentHandler interface {
+	Upload(c *gin.Context)
+	Content(c *gin.Context)
+}
+
 func New(
 	userHandler UserHandler,
 	threadHandler ThreadHandler,
@@ -48,6 +55,7 @@ func New(
 	wsTicketHandler WSTicketHandler,
 	e2eeHandler E2EEHandler,
 	authenticate gin.HandlerFunc,
+	attachmentHandlers ...AttachmentHandler,
 ) *gin.Engine {
 	router := gin.Default()
 
@@ -59,13 +67,19 @@ func New(
 	router.NoMethod(noMethodHandler)
 
 	router.GET("/health", healthHandler)
-	router.GET("/", indexHandler)
+	router.GET("/", pageHandler("web/index.html"))
+	router.GET("/login", pageHandler("web/login.html"))
+	router.GET("/register", pageHandler("web/register.html"))
+	router.GET("/app", pageHandler("web/app.html"))
 	router.StaticFile("/app.js", "web/app.js")
+	router.StaticFile("/auth.js", "web/auth.js")
+	router.StaticFile("/landing.js", "web/landing.js")
 	router.StaticFile("/realtime-core.js", "web/realtime-core.js")
 	router.StaticFile("/e2ee-wasm.js", "web/e2ee-wasm.js")
 	router.StaticFile("/e2ee-state.js", "web/e2ee-state.js")
 	router.StaticFile("/e2ee.js", "web/e2ee.js")
 	router.StaticFile("/style.css", "web/style.css")
+	router.StaticFile("/site.css", "web/site.css")
 	router.GET("/e2ee.wasm", wasmHandler)
 	router.StaticFile("/wasm_exec.js", "web/wasm_exec.js")
 	router.POST("/auth/register", userHandler.Register)
@@ -91,12 +105,20 @@ func New(
 	authenticated.PUT("/threads/:id/read", threadHandler.MarkRead)
 	authenticated.POST("/threads/:id/messages", messageHandler.Send)
 	authenticated.GET("/threads/:id/messages", messageHandler.List)
+	authenticated.POST("/messages/:id/recall", messageHandler.Recall)
+	authenticated.GET("/message-changes", messageHandler.Changes)
+	if len(attachmentHandlers) > 0 && attachmentHandlers[0] != nil {
+		authenticated.POST("/threads/:id/attachments", attachmentHandlers[0].Upload)
+		authenticated.GET("/attachments/:id/content", attachmentHandlers[0].Content)
+	}
 
 	return router
 }
 
-func indexHandler(c *gin.Context) {
-	c.File("web/index.html")
+func pageHandler(path string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.File(path)
+	}
 }
 
 func wasmHandler(c *gin.Context) {

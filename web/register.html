@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng ký | Mini Hermes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/site.css?v=20261019">
+</head>
+<body class="auth-page" data-auth-page="register">
+  <main class="auth-shell">
+    <a class="brand auth-brand" href="/" aria-label="Mini Hermes — về trang chủ"><span class="brand-mark" aria-hidden="true">H</span><span>Mini Hermes</span></a>
+    <section class="auth-card" aria-labelledby="auth-title">
+      <div class="auth-heading"><p class="kicker">Bắt đầu kết nối</p><h1 id="auth-title">Tạo tài khoản</h1><p>Thiết lập tài khoản và khóa mã hóa của bạn.</p></div>
+      <p id="notice" class="form-message success" role="status" hidden></p>
+      <p id="error" class="form-message error" role="alert" hidden></p>
+      <form id="register-form">
+        <label for="register-username">Tên tài khoản</label>
+        <input id="register-username" name="username" autocomplete="username" maxlength="50" required autofocus>
+        <p class="field-help">Từ 1–50 ký tự, tên được chuẩn hóa thành chữ thường.</p>
+        <label for="register-password">Mật khẩu</label>
+        <input id="register-password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required>
+        <p class="field-help">Dùng ít nhất 8 ký tự. Mật khẩu bảo vệ khóa khôi phục của bạn.</p>
+        <button id="register-button" class="button button-primary auth-submit" type="submit">Tạo tài khoản</button>
+      </form>
+      <p class="auth-switch">Đã có tài khoản? <a href="/login">Đăng nhập</a></p>
+    </section>
+    <a class="back-home" href="/">← Quay về trang chủ</a>
+  </main>
+  <script src="/wasm_exec.js?v=20261009-v2" defer></script>
+  <script src="/e2ee-wasm.js?v=20261009-v2" defer></script>
+  <script src="/e2ee.js?v=20261009-v2" defer></script>
+  <script src="/auth.js?v=20261019" defer></script>
+</body>
+</html>

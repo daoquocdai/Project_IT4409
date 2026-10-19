@@ -129,7 +129,11 @@ func threadFromRow(row sqlc.GetThreadSummaryForUserRow) model.Thread {
 		thread.LastMessage = &model.LastMessage{
 			Seq:              row.LastMessageSeq.Int64,
 			SenderExternalID: row.LastMessageSenderExternalID.String(),
-			Content:          row.LastMessageContent.String, CreatedAt: row.LastMessageCreatedAt.Time,
+			Content:          row.LastMessageContent, CreatedAt: row.LastMessageCreatedAt.Time,
+		}
+		if row.LastMessageRecalledAt.Valid {
+			value := row.LastMessageRecalledAt.Time
+			thread.LastMessage.RecalledAt = &value
 		}
 	}
 	return thread
