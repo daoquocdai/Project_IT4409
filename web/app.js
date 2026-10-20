@@ -25,6 +25,7 @@ const groupThreadList = document.querySelector("#group-thread-list");
 const newDirectSection = document.querySelector("#new-direct-section");
 const refreshUsersButton = document.querySelector("#refresh-users-button");
 const peerName = document.querySelector("#peer-name");
+const peerPresence = document.querySelector("#peer-presence");
 const threadStatus = document.querySelector("#thread-status");
 const historyElement = document.querySelector("#history");
 const messageForm = document.querySelector("#message-form");
@@ -67,6 +68,7 @@ const state = {
   socket: null, socketConnecting: false, socketGeneration: 0,
   socketTicketAbort: null, socketHealthTimer: null, socketLastActivityAt: 0,
   socketSummaryStale: false, reconnectTimer: null, reconnectDelay: 1000,
+  onlineUserIDs: new Set(), presenceReady: false, presenceRevision: null,
   e2ee: null, vaultKey: "", authBusy: false,
 };
 
@@ -180,11 +182,56 @@ function validGroupContent(content) {
   const length = [...trimmed].length;
   return length >= 1 && length <= 1000 && !trimmed.includes("\u0000");
 }
+function validPresenceUserID(id) {
+  return typeof id === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) &&
+    id !== "00000000-0000-0000-0000-000000000000";
+}
+function presenceForUser(userID) {
+  if (!state.presenceReady || !validPresenceUserID(userID)) return "unknown";
+  return state.onlineUserIDs.has(userID.toLowerCase()) ? "online" : "offline";
+}
+function updatePresenceLabel(label, userID) {
+  const presence = presenceForUser(userID);
+  label.className = `presence presence-${presence}`;
+  label.dataset.presenceUserId = userID;
+  label.textContent = { online: "Trực tuyến", offline: "Ngoại tuyến", unknown: "Chưa xác định" }[presence];
+}
+function createPresenceLabel(userID) {
+  const label = document.createElement("span");
+  updatePresenceLabel(label, userID);
+  return label;
+}
+function renderPeerPresence() {
+  const peerID = state.currentCache?.summary?.kind === "direct" ? state.currentCache.summary.peer?.id : "";
+  peerPresence.hidden = !peerID;
+  if (peerID) updatePresenceLabel(peerPresence, peerID);
+  else {
+    peerPresence.textContent = "";
+    delete peerPresence.dataset.presenceUserId;
+  }
+}
+function updatePresenceUI() {
+  // Only touch labels: forms, selection, drafts, read position and E2EE stay intact.
+  for (const root of [directThreadList, peerList, memberList]) {
+    for (const label of root.querySelectorAll("[data-presence-user-id]")) {
+      updatePresenceLabel(label, label.dataset.presenceUserId);
+    }
+  }
+  renderPeerPresence();
+}
+function invalidatePresence() {
+  state.onlineUserIDs = new Set();
+  state.presenceReady = false;
+  state.presenceRevision = null;
+  updatePresenceUI();
+}
 function renderThreadHeading() {
   const cache = state.currentCache;
   const thread = cache?.summary;
   peerName.textContent = thread ? threadTitle(thread) : "Chọn cuộc trò chuyện";
   const group = thread?.kind === "group";
+  renderPeerPresence();
   threadStatus.textContent = group
     ? !cache.active ? "Bạn không còn trong nhóm này."
       : cache.permissionsPending ? "Đang cập nhật nhóm..."
@@ -249,6 +296,7 @@ async function sendMessageWithRetry(snapshot, messageID, content) {
 function resetConversation() {
   state.threadID = "";
   state.currentCache = null;
+  renderPeerPresence();
   state.conversationVersion += 1;
   peerName.textContent = "Chọn cuộc trò chuyện";
   threadStatus.textContent = "";
@@ -371,6 +419,10 @@ function renderPeerList() {
     const name = document.createElement("span");
     name.textContent = `${threadTitle(thread)}${thread.kind === "group"
       ? cache.active ? ` · ${thread.member_count} người` : " · Đã rời (lịch sử)" : ""}`;
+    if (thread.kind === "direct") {
+      name.className = "peer-identity";
+      name.append(createPresenceLabel(thread.peer?.id));
+    }
     button.append(name);
     const unread = cache.active ? Number(thread.unread_count || 0) : 0;
     if (unread > 0) {
@@ -398,7 +450,11 @@ function renderPeerList() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "peer";
-    button.textContent = user.username;
+    const name = document.createElement("span");
+    name.className = "peer-identity";
+    name.textContent = user.username;
+    name.append(createPresenceLabel(user.id));
+    button.append(name);
     button.disabled = !state.e2ee?.canRead();
     button.addEventListener("click", () => openDirect(user.id));
     peerList.append(button);
@@ -838,6 +894,7 @@ function stopWebSocket(resetBackoff = true) {
   state.socket = null;
   state.socketConnecting = false;
   state.socketLastActivityAt = 0;
+  invalidatePresence();
   if (resetBackoff) {
     state.reconnectDelay = 1000;
     state.socketSummaryStale = false;
@@ -934,6 +991,33 @@ function handleSocketMessage(data) {
     return;
   }
   if (!event || typeof event !== "object") return;
+  if (event.type === "presence.snapshot") {
+    if (!Number.isSafeInteger(event.revision) || event.revision < 0 ||
+        !Array.isArray(event.online_user_ids) || !event.online_user_ids.every(validPresenceUserID) ||
+        (state.presenceReady && event.revision <= state.presenceRevision)) return;
+    state.onlineUserIDs = new Set(event.online_user_ids.map((id) => id.toLowerCase()));
+    state.presenceRevision = event.revision;
+    state.presenceReady = true;
+    updatePresenceUI();
+    return;
+  }
+  if (event.type === "presence.changed") {
+    if (!Number.isSafeInteger(event.revision) || event.revision < 0 ||
+        !validPresenceUserID(event.user_id) || typeof event.online !== "boolean" ||
+        !state.presenceReady || event.revision <= state.presenceRevision) return;
+    if (event.revision !== state.presenceRevision + 1) {
+      // Use the existing delayed reconnect path to obtain an authoritative snapshot.
+      invalidatePresence();
+      restartWebSocket();
+      return;
+    }
+    const userID = event.user_id.toLowerCase();
+    if (event.online) state.onlineUserIDs.add(userID);
+    else state.onlineUserIDs.delete(userID);
+    state.presenceRevision = event.revision;
+    updatePresenceUI();
+    return;
+  }
   if (event.type === "thread.updated") {
     if (event.recipient_id === state.currentUserID &&
         [event.thread_id, event.recipient_id].every((id) => typeof id === "string" &&
@@ -961,6 +1045,7 @@ async function connectWebSocket() {
   if (!state.token || state.socket || state.socketConnecting) {
     return;
   }
+  invalidatePresence();
   const sessionVersion = state.sessionVersion;
   const token = state.token;
   const generation = state.socketGeneration;
@@ -984,7 +1069,8 @@ async function connectWebSocket() {
     const socket = new WebSocket(url.toString());
     state.socket = socket;
     socket.onopen = () => {
-      if (generation !== state.socketGeneration || state.socket !== socket) {
+      if (generation !== state.socketGeneration || state.socket !== socket ||
+          !currentSessionMatches(sessionVersion, token)) {
         socket.close();
         return;
       }
@@ -1009,26 +1095,29 @@ async function connectWebSocket() {
       void flushReadMarker();
     };
     socket.onmessage = (message) => {
-      if (generation === state.socketGeneration && state.socket === socket) {
+      if (generation === state.socketGeneration && state.socket === socket &&
+          currentSessionMatches(sessionVersion, token)) {
         state.socketLastActivityAt = Date.now();
         if (document.visibilityState === "visible") {
           armSocketTimeout(generation, sessionVersion, token, websocketHeartbeatTimeoutMs);
         } else {
           clearSocketHealthTimer();
         }
-        state.reconnectDelay = 1000;
         handleSocketMessage(message.data);
+        if (generation === state.socketGeneration && state.socket === socket) state.reconnectDelay = 1000;
       }
     };
     socket.onerror = () => socket.close();
     socket.onclose = () => {
-      if (generation !== state.socketGeneration || state.socket !== socket) {
+      if (generation !== state.socketGeneration || state.socket !== socket ||
+          !currentSessionMatches(sessionVersion, token)) {
         return;
       }
       clearSocketHealthTimer();
       state.socket = null;
       state.socketConnecting = false;
       state.socketSummaryStale = true;
+      invalidatePresence();
       scheduleReconnect(generation, sessionVersion, token);
     };
   } catch (error) {
@@ -1311,6 +1400,7 @@ function renderMembers(cache) {
     const item = document.createElement("li");
     const label = document.createElement("span");
     label.textContent = `${member.username} · ${member.role === "admin" ? "Quản trị viên" : "Thành viên"}`;
+    label.append(createPresenceLabel(member.id));
     item.append(label);
     if (admin && member.id !== state.currentUserID) {
       const remove = document.createElement("button");

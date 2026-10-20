@@ -9,11 +9,12 @@ Theo dõi một tin nhắn từ lúc gửi đến khi hiển thị, rồi thêm 
 3. [Chọn người nhận bằng cache thành viên](#cache-thành-viên)
 4. [Gửi lại mà không tạo tin trùng](#retry-pending-và-dữ-liệu-client)
 5. [Lấy bù tin khi mất kết nối](#lịch-sử-cache-và-reconnect)
-6. [Đồng bộ trạng thái đọc giữa các tab](#read-marker-unread-và-nhiều-tab)
-7. [E2EE: mã hóa, giải mã và đồng bộ khóa](#e2ee-phiên-cố-định-và-khôi-phục)
-8. [X3DH: khởi tạo khóa phiên giữa A và B](#x3dh-khởi-tạo-khóa-phiên-giữa-a-và-b)
-9. [Đăng ký để tạo và bảo vệ khóa](#đăng-ký)
-10. [Đăng nhập để mở lại khóa và bắt đầu chat](#đăng-nhập-và-vé-websocket)
+6. [Trạng thái online/offline](#presence-onlineoffline)
+7. [Đồng bộ trạng thái đọc giữa các tab](#read-marker-unread-và-nhiều-tab)
+8. [E2EE: mã hóa, giải mã và đồng bộ khóa](#e2ee-phiên-cố-định-và-khôi-phục)
+9. [X3DH: khởi tạo khóa phiên giữa A và B](#x3dh-khởi-tạo-khóa-phiên-giữa-a-và-b)
+10. [Đăng ký để tạo và bảo vệ khóa](#đăng-ký)
+11. [Đăng nhập để mở lại khóa và bắt đầu chat](#đăng-nhập-và-vé-websocket)
 
 ## Khởi động hệ thống
 
@@ -142,7 +143,55 @@ sequenceDiagram
 
 Tin thiếu cũng được lấy bù khi client phát hiện khoảng trống trong sequence. Lịch sử dùng cursor `before_seq`, trả trang từ mới đến cũ; client hiển thị từ cũ đến mới. B chỉ đọc các khoảng mình từng ở trong nhóm. Việc lấy bù theo sự kiện hoặc thao tác, không polling.
 
-B đã thấy tin. Bước tiếp theo là cập nhật trạng thái đọc ở các tab khác của B.
+B đã lấy lại tin. Kết nối đó cũng cung cấp trạng thái online/offline hiện tại; trạng thái đọc của tin được xử lý riêng ở phần sau.
+
+## Presence: online/offline
+
+**Trực tuyến** nghĩa là Hub còn ít nhất một socket đã xác thực và đăng ký thành công của user, chưa bị xác định là chết. **Ngoại tuyến** nghĩa là gateway đã xác định user không còn socket nào. Đăng nhập HTTP chưa tạo presence: gateway phải kiểm tra ticket/JWT, Origin, upgrade WebSocket và đăng ký socket trước.
+
+Presence lấy trực tiếp từ map socket trong RAM của Hub, trong phạm vi **một gateway**. Mọi socket đã xác thực được xem trạng thái của các tài khoản, phù hợp với `/users` hiện liệt kê toàn bộ tài khoản. Không thêm REST endpoint, Redis key/Stream, cột database hay cache message cho presence; không có last-seen, idle hoặc ẩn trạng thái.
+
+### Snapshot và delta
+
+Mỗi socket mới, kể cả tab thứ hai của cùng user, nhận snapshot chứa toàn bộ user đang online, gồm chính tài khoản vừa kết nối:
+
+```json
+{
+  "type": "presence.snapshot",
+  "revision": 12,
+  "online_user_ids": [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222"
+  ]
+}
+```
+
+Snapshot là frame presence đầu tiên của socket. Nó thay toàn bộ tập online của tab; sau snapshot hợp lệ, tài khoản đã biết không nằm trong tập được coi là offline. Khi user mất socket cuối cùng, các socket còn lại nhận:
+
+```json
+{
+  "type": "presence.changed",
+  "revision": 13,
+  "user_id": "22222222-2222-4222-8222-222222222222",
+  "online": false
+}
+```
+
+Hub chỉ tăng `revision` và phát delta khi số socket của một user chuyển **0 → 1** hoặc **1 → 0**. Thêm/bớt socket trong khi user vẫn online không tạo delta. Socket mới biết trạng thái của chính nó qua snapshot, nên không nhận lại delta online tương ứng. Việc sửa map, tăng revision, chụp snapshot và enqueue frame presence được tuần tự hóa dưới khóa Hub; writer riêng thực hiện I/O sau đó. Nhờ vậy snapshot không ghi đè một delta mới hơn và các socket nhận delta theo đúng thứ tự. Enqueue không block; queue đầy dẫn tới đóng socket để reconnect lấy snapshot, không giữ socket với delta đã bị bỏ.
+
+`revision` là thứ tự riêng trong vòng đời gateway, không liên quan `message.seq` hay read marker. Client kiểm tra revision là số nguyên an toàn không âm, UUID hợp lệ khác nil và boolean `online`; snapshot sai không được áp dụng một phần. Delta chỉ được áp dụng sau snapshot; revision cũ/trùng bị bỏ qua. Gap revision làm cache presence mất hiệu lực và dùng reconnect/backoff hiện có để lấy snapshot mới. Snapshot cũ trên cùng socket không được ghi đè trạng thái mới. Socket mới reset revision, nên vẫn chấp nhận snapshot có revision thấp hơn sau gateway restart.
+
+### Nhiều tab, mất kết nối và giao diện
+
+Nếu B mở hai tab, đóng hoặc đăng xuất một tab vẫn để B online ở phía A. Chỉ khi gateway cleanup socket cuối của B mới phát offline, đúng một lần dù cleanup được gọi lại. Chuyển tab, thu nhỏ cửa sổ hoặc không thao tác không quyết định presence.
+
+Phía người xem hiển thị **Chưa xác định** trước snapshot hoặc khi socket mất kết nối/restart; `onopen` chưa đủ để coi dữ liệu sẵn sàng. Reconnect nhận snapshot hiện tại để sửa mọi delta bỏ lỡ. Logout/đổi tài khoản xóa cache; kiểm tra generation và session bỏ event từ socket hoặc tài khoản cũ. Tập online và revision chỉ ở RAM của tab, không ghi vào `localStorage` hay `sessionStorage`.
+
+Nhãn “Trực tuyến”, “Ngoại tuyến”, “Chưa xác định” xuất hiện ở peer direct trong sidebar, danh sách mở chat, header direct và từng thành viên nhóm. Nhãn có text bên cạnh dấu trạng thái để không phụ thuộc riêng màu sắc. Header direct dùng vùng presence riêng; `thread-status` vẫn phục vụ E2EE/nhóm. Presence update chỉ cập nhật phần DOM liên quan, giữ draft, thread đang mở, lựa chọn thành viên, vị trí đọc và E2EE. Nó không gọi `/users`, tải thread/lịch sử, tạo message hoặc tăng unread; làm mới `/users` theo thao tác sẽ gắn nhãn từ cache hiện tại. Các request lấy bù vốn có của reconnect vẫn được giữ.
+
+Gateway gửi **WebSocket control Ping mỗi 10 giây**, chờ **Pong tối đa 5 giây**; `CloseRead()` tiếp tục xử lý control frame. Heartbeat JSON `{"type":"heartbeat"}` vẫn gửi mỗi 5 giây, không cần JavaScript gửi application ping/pong. Mất mạng im lặng thường được phát hiện trong khoảng **15 giây** trong điều kiện bình thường, không phải giới hạn tuyệt đối dưới mọi tải và điều kiện mạng. Logic tab ẩn của frontend vẫn được giữ; không tự đánh user offline từ `visibilitychange` hoặc `navigator.onLine`.
+
+Gateway restart xóa map và revision trong RAM. Client sẽ nhận unknown khi nhận biết kết nối mất rồi khôi phục từ snapshot trên socket mới. Shutdown ưu tiên đóng socket an toàn, không bảo đảm phát đủ delta offline trước khi process dừng. Presence hiện chưa đồng bộ được giữa nhiều gateway; triển khai nhiều instance cần một quyết định kiến trúc khác.
 
 ## Read marker, unread và nhiều tab
 
@@ -531,6 +580,8 @@ sequenceDiagram
     API-->>B: Vé và địa chỉ gateway
     B->>G: Kết nối WebSocket bằng vé
     G->>G: Tiêu thụ vé trong Redis trước khi mở kết nối
+    G->>G: Upgrade thành công, đăng ký socket vào Hub
+    G-->>B: presence.snapshot gồm trạng thái của B
     G-->>B: Sẵn sàng nhận tin realtime
     Note over B: Khi đọc/gửi direct, tải backup và khôi phục SK nếu cần
 ```
@@ -539,7 +590,7 @@ JWT xác thực các request HTTP. Vé WebSocket dùng một lần, mặc địn
 
 | Dữ liệu phía client | Nơi lưu |
 | --- | --- |
-| Private keys đã mở, SK, plaintext và cache tin | RAM của tab |
+| Private keys đã mở, SK, plaintext, cache tin và presence | RAM của tab |
 | JWT, username, user UUID, khóa mở vault để reload cùng phiên | `sessionStorage`, xóa khi đăng xuất |
 | UUID/context/envelope/body của tin direct chưa xác nhận | Outbox trong `localStorage`, fallback RAM nếu storage lỗi |
 
@@ -553,6 +604,7 @@ Quên mật khẩu và mất mọi khóa đã mở thì không phục hồi đư
 | Khởi động API / gateway | [`run`](../cmd/main.go), [`run/serve`](../cmd/ws-gateway/main.go) |
 | Handler → service → repository | [router](../internal/route/router.go), [`Send`](../internal/module/message/service/service.go), [transaction gửi tin](../internal/module/message/repository/postgres.go) |
 | Publish, queue, ACK | [`PublishMessage`](../internal/module/message/service/publish.go), [`handleStreams`](../internal/gateway/consumer.go), [`Dispatch/writeLoop`](../internal/gateway/hub.go) |
+| Presence và vòng đời socket | [payload presence](../internal/gateway/presence.go), [`add/remove/writeLoop`](../internal/gateway/hub.go), [client presence](../web/app.js) |
 | Nhóm và membership | [`CreateGroup/ChangeMember`](../internal/module/thread/repository/groups.go), [queries](../db/queries/groups.sql) |
 | Cache thành viên | [`messageRecipients`](../internal/module/message/service/publish.go), [queries tại sequence](../db/queries/messages.sql), [`Redis.Get/Put`](../internal/module/thread/membership/redis.go) |
 | Gộp tin, catch-up và read marker | [realtime core](../web/realtime-core.js), [`loadThreads/flushReadMarker`](../web/app.js), [`MarkRead`](../internal/module/thread/service/service.go) |

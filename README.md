@@ -84,6 +84,18 @@ Các endpoint nghiệp vụ yêu cầu `Authorization: Bearer <access_token>`; `
 
 Gateway nhận `GET /ws?ticket=...`; client ngoài browser cũng có thể dùng Bearer JWT trong header. Claim/epoch APIs chỉ áp dụng cho direct. Payload mật mã được giải thích tại [luồng E2EE](docs/project-flows.md#e2ee-phiên-cố-định-và-khôi-phục).
 
+## Trạng thái online/offline
+
+User **trực tuyến** khi còn ít nhất một socket đã xác thực, upgrade và đăng ký thành công vào Hub; đăng nhập HTTP thành công chưa đủ. User **ngoại tuyến** khi gateway xác định không còn socket nào của tài khoản đó. Mở nhiều tab/thiết bị vẫn tính chung một user: chỉ socket đầu tiên phát online, chỉ khi mất socket cuối cùng mới phát offline. Chuyển tab, thu nhỏ cửa sổ hoặc không thao tác không làm user offline.
+
+Mỗi socket mới nhận `presence.snapshot` đầu tiên trong các frame presence, gồm toàn bộ `online_user_ids` và chính user vừa kết nối. Sau đó, `presence.changed` mang `user_id`, boolean `online` và `revision` tăng theo mỗi lần user đổi trạng thái. Revision thuộc riêng presence, không dùng `message.seq`. Tab thứ hai vẫn nhận snapshot nhưng không tạo delta online thừa.
+
+Client chỉ hiển thị trực tuyến/ngoại tuyến sau snapshot hợp lệ; tài khoản đã biết không có trong snapshot được coi là ngoại tuyến. Trước snapshot hoặc khi mất kết nối/reconnect, nhãn chuyển thành **Chưa xác định**. Snapshot mới thay toàn bộ cache trong RAM của tab; khi thiếu revision, client dùng reconnect/backoff hiện có để lấy lại snapshot. Các nhãn xuất hiện ở direct trong sidebar, danh sách mở chat, header direct và thành viên nhóm; cập nhật presence giữ nguyên draft và lựa chọn thành viên.
+
+Gateway gửi WebSocket control Ping mỗi 10 giây, chờ Pong tối đa 5 giây và giữ heartbeat JSON mỗi 5 giây. Mất mạng im lặng thường được phát hiện trong khoảng 15 giây; đây không phải giới hạn tuyệt đối dưới mọi tải và điều kiện mạng. Heartbeat không đo hoạt động của người dùng.
+
+Presence chỉ nằm trong RAM của **một gateway**, phát trực tiếp từ Hub cho các socket đã xác thực; không có REST endpoint, Redis key/Stream hay cột database cho presence. Gateway restart làm mất trạng thái và reset revision; mỗi socket reconnect lấy snapshot mới. Bản này không có last-seen, idle hoặc ẩn trạng thái. Payload và thứ tự xử lý: [luồng presence](docs/project-flows.md#presence-onlineoffline).
+
 ## Sơ đồ sequence tóm tắt
 
 Tin được lưu trước khi phát realtime. WebSocket bao gồm các thiết bị của sender; client gộp UUID và lấy bù REST khi thiếu tin.
@@ -128,6 +140,7 @@ make wasm
 make test
 make build
 go vet ./...
+go test -race ./internal/gateway
 node --test web/e2ee-client.test.cjs
 ```
 
@@ -156,6 +169,8 @@ Kiểm tra nhanh trên giao diện:
 3. Ngắt mạng B, gửi từ A rồi nối lại; tin thiếu được lấy bù, không lặp UUID. Khởi động lại gateway để kiểm tra reconnect.
 4. Mở hai tab B; đọc thread ở tab đang hiển thị và ở cuối chat, theo dõi unread ở tab còn lại. Direct A nhận summary về marker của B mà không có tin mới.
 5. Đăng ký C sau khi A đã mở web, dùng nút “Làm mới danh sách” để thấy C. Với nhóm, thử tin bị từ chối rồi sửa và gửi; lỗi mạng giữ bản gửi lại cho đến khi được xác nhận.
+6. Kiểm tra nhãn presence của A/B trong sidebar, danh sách mở chat, header direct và panel thành viên nhóm. Mở hai tab B, đóng/đăng xuất một tab: B vẫn trực tuyến; đóng tab cuối: A thấy B ngoại tuyến. Chuyển tab hoặc thu nhỏ cửa sổ không làm B ngoại tuyến.
+7. Ngắt mạng ở phía người xem: các nhãn chuyển thành “Chưa xác định”. Khi nối lại, snapshot phải sửa các thay đổi đã bỏ lỡ. Với mất mạng im lặng của B, theo dõi A phát hiện offline sau chu kỳ Ping/Pong (thường khoảng 15 giây); restart gateway rồi xác nhận snapshot mới vẫn được nhận dù revision thấp hơn trước. Trong lúc thử, giữ draft và lựa chọn thành viên để kiểm tra chúng không bị mất.
 
 ## Tài liệu
 
