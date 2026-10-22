@@ -9,10 +9,12 @@ Theo dõi một tin nhắn từ lúc gửi đến khi hiển thị, rồi thêm 
 3. [Chọn người nhận bằng cache thành viên](#cache-thành-viên)
 4. [Gửi lại mà không tạo tin trùng](#retry-pending-và-dữ-liệu-client)
 5. [Lấy bù tin khi mất kết nối](#lịch-sử-cache-và-reconnect)
-6. [Đồng bộ trạng thái đọc giữa các tab](#read-marker-unread-và-nhiều-tab)
-7. [E2EE: mã hóa, giải mã và đồng bộ khóa](#e2ee-phiên-cố-định-và-khôi-phục)
-8. [Đăng ký để tạo và bảo vệ khóa](#đăng-ký)
-9. [Đăng nhập để mở lại khóa và bắt đầu chat](#đăng-nhập-và-vé-websocket)
+6. [Trạng thái online/offline](#presence-onlineoffline)
+7. [Đồng bộ trạng thái đọc giữa các tab](#read-marker-unread-và-nhiều-tab)
+8. [E2EE: mã hóa, giải mã và đồng bộ khóa](#e2ee-phiên-cố-định-và-khôi-phục)
+9. [X3DH: khởi tạo khóa phiên giữa A và B](#x3dh-khởi-tạo-khóa-phiên-giữa-a-và-b)
+10. [Đăng ký để tạo và bảo vệ khóa](#đăng-ký)
+11. [Đăng nhập để mở lại khóa và bắt đầu chat](#đăng-nhập-và-vé-websocket)
 
 ## Khởi động hệ thống
 
@@ -141,7 +143,55 @@ sequenceDiagram
 
 Tin thiếu cũng được lấy bù khi client phát hiện khoảng trống trong sequence. Lịch sử dùng cursor `before_seq`, trả trang từ mới đến cũ; client hiển thị từ cũ đến mới. B chỉ đọc các khoảng mình từng ở trong nhóm. Việc lấy bù theo sự kiện hoặc thao tác, không polling.
 
-B đã thấy tin. Bước tiếp theo là cập nhật trạng thái đọc ở các tab khác của B.
+B đã lấy lại tin. Kết nối đó cũng cung cấp trạng thái online/offline hiện tại; trạng thái đọc của tin được xử lý riêng ở phần sau.
+
+## Presence: online/offline
+
+**Trực tuyến** nghĩa là Hub còn ít nhất một socket đã xác thực và đăng ký thành công của user, chưa bị xác định là chết. **Ngoại tuyến** nghĩa là gateway đã xác định user không còn socket nào. Đăng nhập HTTP chưa tạo presence: gateway phải kiểm tra ticket/JWT, Origin, upgrade WebSocket và đăng ký socket trước.
+
+Presence lấy trực tiếp từ map socket trong RAM của Hub, trong phạm vi **một gateway**. Mọi socket đã xác thực được xem trạng thái của các tài khoản, phù hợp với `/users` hiện liệt kê toàn bộ tài khoản. Không thêm REST endpoint, Redis key/Stream, cột database hay cache message cho presence; không có last-seen, idle hoặc ẩn trạng thái.
+
+### Snapshot và delta
+
+Mỗi socket mới, kể cả tab thứ hai của cùng user, nhận snapshot chứa toàn bộ user đang online, gồm chính tài khoản vừa kết nối:
+
+```json
+{
+  "type": "presence.snapshot",
+  "revision": 12,
+  "online_user_ids": [
+    "11111111-1111-4111-8111-111111111111",
+    "22222222-2222-4222-8222-222222222222"
+  ]
+}
+```
+
+Snapshot là frame presence đầu tiên của socket. Nó thay toàn bộ tập online của tab; sau snapshot hợp lệ, tài khoản đã biết không nằm trong tập được coi là offline. Khi user mất socket cuối cùng, các socket còn lại nhận:
+
+```json
+{
+  "type": "presence.changed",
+  "revision": 13,
+  "user_id": "22222222-2222-4222-8222-222222222222",
+  "online": false
+}
+```
+
+Hub chỉ tăng `revision` và phát delta khi số socket của một user chuyển **0 → 1** hoặc **1 → 0**. Thêm/bớt socket trong khi user vẫn online không tạo delta. Socket mới biết trạng thái của chính nó qua snapshot, nên không nhận lại delta online tương ứng. Việc sửa map, tăng revision, chụp snapshot và enqueue frame presence được tuần tự hóa dưới khóa Hub; writer riêng thực hiện I/O sau đó. Nhờ vậy snapshot không ghi đè một delta mới hơn và các socket nhận delta theo đúng thứ tự. Enqueue không block; queue đầy dẫn tới đóng socket để reconnect lấy snapshot, không giữ socket với delta đã bị bỏ.
+
+`revision` là thứ tự riêng trong vòng đời gateway, không liên quan `message.seq` hay read marker. Client kiểm tra revision là số nguyên an toàn không âm, UUID hợp lệ khác nil và boolean `online`; snapshot sai không được áp dụng một phần. Delta chỉ được áp dụng sau snapshot; revision cũ/trùng bị bỏ qua. Gap revision làm cache presence mất hiệu lực và dùng reconnect/backoff hiện có để lấy snapshot mới. Snapshot cũ trên cùng socket không được ghi đè trạng thái mới. Socket mới reset revision, nên vẫn chấp nhận snapshot có revision thấp hơn sau gateway restart.
+
+### Nhiều tab, mất kết nối và giao diện
+
+Nếu B mở hai tab, đóng hoặc đăng xuất một tab vẫn để B online ở phía A. Chỉ khi gateway cleanup socket cuối của B mới phát offline, đúng một lần dù cleanup được gọi lại. Chuyển tab, thu nhỏ cửa sổ hoặc không thao tác không quyết định presence.
+
+Phía người xem hiển thị **Chưa xác định** trước snapshot hoặc khi socket mất kết nối/restart; `onopen` chưa đủ để coi dữ liệu sẵn sàng. Reconnect nhận snapshot hiện tại để sửa mọi delta bỏ lỡ. Logout/đổi tài khoản xóa cache; kiểm tra generation và session bỏ event từ socket hoặc tài khoản cũ. Tập online và revision chỉ ở RAM của tab, không ghi vào `localStorage` hay `sessionStorage`.
+
+Nhãn “Trực tuyến”, “Ngoại tuyến”, “Chưa xác định” xuất hiện ở peer direct trong sidebar, danh sách mở chat, header direct và từng thành viên nhóm. Nhãn có text bên cạnh dấu trạng thái để không phụ thuộc riêng màu sắc. Header direct dùng vùng presence riêng; `thread-status` vẫn phục vụ E2EE/nhóm. Presence update chỉ cập nhật phần DOM liên quan, giữ draft, thread đang mở, lựa chọn thành viên, vị trí đọc và E2EE. Nó không gọi `/users`, tải thread/lịch sử, tạo message hoặc tăng unread; làm mới `/users` theo thao tác sẽ gắn nhãn từ cache hiện tại. Các request lấy bù vốn có của reconnect vẫn được giữ.
+
+Gateway gửi **WebSocket control Ping mỗi 10 giây**, chờ **Pong tối đa 5 giây**; `CloseRead()` tiếp tục xử lý control frame. Heartbeat JSON `{"type":"heartbeat"}` vẫn gửi mỗi 5 giây, không cần JavaScript gửi application ping/pong. Mất mạng im lặng thường được phát hiện trong khoảng **15 giây** trong điều kiện bình thường, không phải giới hạn tuyệt đối dưới mọi tải và điều kiện mạng. Logic tab ẩn của frontend vẫn được giữ; không tự đánh user offline từ `visibilitychange` hoặc `navigator.onLine`.
+
+Gateway restart xóa map và revision trong RAM. Client sẽ nhận unknown khi nhận biết kết nối mất rồi khôi phục từ snapshot trên socket mới. Shutdown ưu tiên đóng socket an toàn, không bảo đảm phát đủ delta offline trước khi process dừng. Presence hiện chưa đồng bộ được giữa nhiều gateway; triển khai nhiều instance cần một quyết định kiến trúc khác.
 
 ## Read marker, unread và nhiều tab
 
@@ -280,7 +330,7 @@ sequenceDiagram
     B->>B: Mở bản trả về, kiểm tra khớp SK vừa tính
 ```
 
-**Phương thức:** X25519 tạo các bí mật DH bằng private key của một bên và public key của bên còn lại. Hai bên tính được cùng kết quả; HKDF-SHA256 biến các kết quả đó thành SK 32 byte. Có OPK thì dùng 4 DH, hết OPK thì dùng 3 DH. Các cặp khóa và công thức DH cụ thể nằm ở phần tra cứu bên dưới.
+**Phương thức:** X25519 tạo các bí mật DH bằng private key của một bên và public key của bên còn lại. Hai bên tính được cùng kết quả; HKDF-SHA256 biến các kết quả đó thành SK 32 byte. Có OPK thì dùng 4 DH, hết OPK thì dùng 3 DH. Vai trò từng khóa, công thức và trình tự API được giải thích riêng ở [luồng X3DH](#x3dh-khởi-tạo-khóa-phiên-giữa-a-và-b).
 
 **Bootstrap** chứa ID phiên, public keys, ID prekey và bản mã của một chuỗi xác nhận cố định. Client dẫn xuất khóa xác nhận từ SK, mở bản mã này rồi kiểm tra đúng chuỗi cố định, qua đó kiểm tra khóa khớp với thông tin epoch. A/B lưu **hai backup riêng cho cùng SK**; BK_A/BK_B được dẫn xuất từ VK của từng tài khoản.
 
@@ -351,18 +401,9 @@ C  = Seal(MK, nonce, P, AAD_msg)
 P  = Open(MK, nonce, C, AAD_msg)
 ```
 
-**X3DH — [`CreateEpoch/OpenEpoch`](../internal/e2ee/epoch.go), [`deriveKey`](../internal/e2ee/crypto.go):** `.priv/.pub` là khóa riêng/công khai X25519 dài 32 byte.
-
-| Bí mật | A tính | B tính |
-| --- | --- | --- |
-| DH1 | `X25519(IK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, IK_A.pub)` |
-| DH2 | `X25519(EK_A.priv, IK_B.pub)` | `X25519(IK_B.priv, EK_A.pub)` |
-| DH3 | `X25519(EK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, EK_A.pub)` |
-| DH4, nếu có OPK | `X25519(EK_A.priv, OPK_B.pub)` | `X25519(OPK_B.priv, EK_A.pub)` |
+**Xác nhận epoch — [`CreateEpoch/OpenEpoch`](../internal/e2ee/epoch.go):** SK được tạo theo [công thức X3DH](#bước-3-hai-bên-tính-cùng-sk) bên dưới; context phiên được gắn vào bản mã xác nhận.
 
 ```text
-IKM = (32 byte 0xff) + DH1 + DH2 + DH3 [+ DH4 nếu có OPK]
-SK  = HKDF(IKM, salt=32 byte 0x00, info="Mini-Hermes/X3DH/v1", length=32)
 AAD_epoch = "Mini-Hermes/key-epoch/v2\0"
             + UUID(thread_id) + UUID(epoch_id) + UUID(sender_id) + UUID(recipient_id)
             + Pub(IK_A) + Pub(IK_B) + Pub(EK_A)
@@ -396,6 +437,101 @@ SK         = Open(BK, nonce_backup, C_backup, AAD_backup)
 Vault/backup dùng record `{version: 1, nonce, ciphertext}` với nonce/ciphertext Base64; backup có plaintext SK 32 byte và ciphertext 48 byte gồm tag. Client kiểm tra confirmation của epoch sau khi mở backup. [Client E2EE](../web/e2ee.js) điều phối request, cache và khôi phục; [outbox](../web/e2ee-state.js) giữ bản gửi chưa xác nhận.
 
 </details>
+
+## X3DH: khởi tạo khóa phiên giữa A và B
+
+**X3DH (Extended Triple Diffie-Hellman)** là bước thỏa thuận để A và B tự tính ra cùng **SK 32 byte**, kể cả khi B đang offline. Trong dự án, bước này chạy khi client cần gửi vào một direct chưa có epoch. SK sau đó làm gốc dẫn xuất khóa từng tin như phần E2EE ở trên.
+
+**Đầu vào:** private key định danh của A, public bundle của B và các ID của cuộc trò chuyện/epoch. **Đầu ra:** SK tại client A, bootstrap công khai kèm bản mã xác nhận và backup SK đã mã hóa. B dùng bootstrap cùng private keys của mình để tính lại SK; SK không được gửi dưới dạng rõ lên server.
+
+### Bước 1. B chuẩn bị khóa trước khi có cuộc trò chuyện
+
+Khi đăng ký, client tạo bộ khóa và mã hóa private keys trong vault. Server giữ public bundle cùng hàng đợi public OPK để một người khác có thể bắt đầu chat khi B chưa online.
+
+| Ký hiệu | Ai giữ private key? | Vai trò trong lần A khởi tạo |
+| --- | --- | --- |
+| `IK_A` — identity key của A | Vault A | Gắn phép tính DH với khóa định danh bên khởi tạo |
+| `IK_B` — identity key của B | Vault B | Gắn phép tính DH với khóa định danh bên nhận |
+| `SPK_B` — signed prekey của B | Vault B | Public key được B ký bằng `IK_B.priv`; A kiểm tra chữ ký trước khi dùng |
+| `OPK_B` — one-time prekey của B | Vault B | Thêm một phép DH nếu server còn public OPK chưa claim |
+| `EK_A` — ephemeral key của A | Tạo tạm tại client A | Cặp khóa mới cho lần khởi tạo; xóa private key sau khi tạo SK |
+
+`.priv` và `.pub` bên dưới lần lượt là khóa riêng và khóa công khai X25519, mỗi khóa dài 32 byte. Dự án tạo sẵn **20 OPK** cho mỗi tài khoản, SPK có ID 1 và OPK có ID 2–21. EK được sinh ngẫu nhiên khi khởi tạo phiên; mật khẩu dùng để mở vault chứa các khóa gốc đã tạo trước đó.
+
+### Bước 2. A lấy bundle và đề xuất phiên khóa
+
+```mermaid
+flowchart TD
+    START["A cần gửi tin direct"] --> LIST["GET /threads/{thread_id}/epochs"]
+    LIST --> HAS{"Đã có current_epoch_id?"}
+    HAS -->|Có| RESTORE["Khôi phục SK của epoch hiện tại"]
+    HAS -->|Chưa| CLAIM["POST /e2ee/bundles/{B}/claim<br/>Body: thread_id"]
+    CLAIM --> CHECK["Kiểm tra bundle đúng B<br/>và chữ ký SPK bằng IK_B.pub"]
+    CHECK --> DH["Sinh EK_A<br/>Tính DH1, DH2, DH3 và DH4 nếu có OPK"]
+    DH --> SK["HKDF-SHA256 tạo SK"]
+    SK --> PACK["Tạo bootstrap xác nhận SK<br/>và backup mã hóa bằng BK_A"]
+    PACK --> SAVE["POST /threads/{thread_id}/epochs<br/>epoch_id, bootstrap, key_backup"]
+    SAVE --> COMMIT["Mở backup server trả về, xác minh SK<br/>rồi mới dùng phiên để gửi tin"]
+```
+
+API claim kiểm tra A/B là hai thành viên của direct, khóa bản ghi user B và lấy một public OPK trong transaction. OPK được **xóa khỏi hàng đợi ngay khi claim**, nên các lần claim thành công không nhận lại cùng OPK. Nếu hết OPK, bundle vẫn có IK/SPK và A dùng nhánh 3 DH. Chữ ký SPK không hợp lệ thì client dừng khởi tạo.
+
+### Bước 3. Hai bên tính cùng SK
+
+Với X25519, `DH(private_A, public_B)` và `DH(private_B, public_A)` cho cùng bí mật. Hai bên tính từng hàng sau theo cùng thứ tự, rồi nối kết quả để đưa vào HKDF:
+
+| Bí mật | A tính khi tạo phiên | B tính khi mở phiên |
+| --- | --- | --- |
+| DH1 | `X25519(IK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, IK_A.pub)` |
+| DH2 | `X25519(EK_A.priv, IK_B.pub)` | `X25519(IK_B.priv, EK_A.pub)` |
+| DH3 | `X25519(EK_A.priv, SPK_B.pub)` | `X25519(SPK_B.priv, EK_A.pub)` |
+| DH4, nếu có OPK | `X25519(EK_A.priv, OPK_B.pub)` | `X25519(OPK_B.priv, EK_A.pub)` |
+
+DH1 và DH2 đưa khóa định danh của hai bên vào thỏa thuận. DH3 đưa khóa tạm thời của A và prekey của B vào phép tính; DH4 bổ sung prekey chỉ được cấp một lần. Tên Triple DH chỉ ba phép cơ sở; khi có OPK, X3DH thực hiện thêm phép thứ tư.
+
+Trong [`deriveKey`](../internal/e2ee/crypto.go#L163), mỗi kết quả DH dài 32 byte; công thức thực tế là:
+
+```text
+IKM = (32 byte 0xff) + DH1 + DH2 + DH3 [+ DH4 nếu có OPK]
+SK  = HKDF-SHA256(
+        input = IKM,
+        salt = 32 byte 0x00,
+        info = "Mini-Hermes/X3DH/v1",
+        length = 32 byte
+      )
+```
+
+`+` là nối byte. Hai bên dùng cùng bộ khóa tương ứng, cùng thứ tự DH và tham số HKDF nên có cùng SK. Server chỉ có public keys và dữ liệu mã hóa, không có private keys cần để tính các bí mật DH này.
+
+### Bước 4. B mở bootstrap và xác nhận khóa
+
+Bootstrap A lưu chứa `IK_A.pub`, `IK_B.pub`, `EK_A.pub`, ID SPK/OPK, các ID thread/epoch/A/B và bản mã xác nhận. Private key tạm thời của A được xóa sau khi tạo SK; public key tạm thời vẫn nằm trong bootstrap để B tính DH2–DH4.
+
+Khi B online và cần mở phiên lần đầu:
+
+1. B tải `GET /threads/{thread_id}/epochs`. Nếu đã có backup riêng, B mở backup để khôi phục SK.
+2. Nếu chưa có backup, B kiểm tra bootstrap thuộc đúng thread và hai tài khoản, rồi chọn private IK/SPK/OPK trong vault theo các ID của bootstrap.
+3. B chạy [`OpenEpoch`](../internal/e2ee/epoch.go#L190), tính các DH ở cột B và dẫn xuất cùng SK. Từ SK và context epoch, client tạo khóa xác nhận rồi mở bản mã bằng AES-GCM; nội dung phải khớp `Mini-Hermes/epoch-confirmed/v2`. Sai khóa hoặc dữ liệu xác nhận bị sửa thì không dùng phiên.
+4. B dùng BK_B mã hóa SK và gửi `PUT /threads/{thread_id}/epochs/{epoch_id}/key`. Client mở backup server trả về và kiểm tra bằng SK vừa tính trước khi cache khóa.
+5. A/B đã có cùng SK. Tin “Chào B” được mã hóa/giải mã bằng MK dẫn xuất từ SK và context của từng tin; B trả lời cũng dùng epoch này.
+
+API lưu bootstrap, backup A và `current_epoch_id` trong cùng transaction. Vì A không còn `EK_A.priv`, backup đã lưu là dữ liệu cần để A khôi phục SK trên máy mới.
+
+### Các trường hợp cần hiểu đúng trong dự án
+
+| Trường hợp | Hành vi hiện tại |
+| --- | --- |
+| B offline khi A bắt đầu | A dùng public prekeys đã đăng ký; B tính SK sau từ bootstrap và vault |
+| Hết public OPK | Direct mới dùng DH1–DH3; các epoch đã có giữ nguyên SK |
+| A/B cùng khởi tạo | Server khóa thread, giữ epoch commit đầu tiên; đề xuất còn lại nhận `409`, bỏ SK đề xuất và khôi phục epoch server đã chọn |
+| Reload, đăng nhập lại hoặc đổi máy | Dùng epoch đã có và backup riêng; recipient chưa có backup có thể tính lại từ vault/bootstrap |
+| Public OPK đã claim | Public OPK bị xóa khỏi hàng đợi; private OPK vẫn nằm trong vault để khôi phục phiên |
+
+Việc giữ private prekeys và backup SK là đánh đổi phục hồi lịch sử của [ADR 005](adr/005-recoverable-e2ee-sessions.md). Dự án dùng một epoch cố định, chưa có Double Ratchet hay rekey, nên không có cơ chế tự phục hồi bảo mật sau khi khóa bị lộ. Kiểm tra chữ ký SPK xác nhận SPK khớp với IK được cung cấp; UI hiện chưa có bước đối chiếu fingerprint ngoài kênh để xác minh IK đó thuộc đúng người.
+
+Đọc code theo thứ tự: [`GenerateAccountVault`](../internal/e2ee/account.go#L101) → [`Claim`](../internal/module/e2ee/repository/postgres.go#L40) và [SQL tiêu thụ OPK](../db/queries/prekeys.sql) → [`CreateEpoch`](../internal/e2ee/epoch.go#L121) / [`deriveKey`](../internal/e2ee/crypto.go#L163) → [`OpenEpoch`](../internal/e2ee/epoch.go#L190) → [client điều phối phiên và backup](../web/e2ee.js#L138). Test đối chiếu: [`TestEpoch3DH4DHAndStatelessReplies`](../internal/e2ee/session_test.go#L119).
+
+Nguồn giải thích giao thức: [đặc tả X3DH của Signal](https://signal.org/docs/specifications/x3dh/). Luồng trên mô tả profile Mini-Hermes; các quyết định giữ khóa và backup tuân theo ADR 005 của dự án.
 
 Các luồng trên cần bộ khóa gốc và vault có thể mở lại bằng mật khẩu. Phần đăng ký tiếp theo giải thích cách tài khoản tạo và lưu những dữ liệu đó.
 
@@ -444,6 +580,8 @@ sequenceDiagram
     API-->>B: Vé và địa chỉ gateway
     B->>G: Kết nối WebSocket bằng vé
     G->>G: Tiêu thụ vé trong Redis trước khi mở kết nối
+    G->>G: Upgrade thành công, đăng ký socket vào Hub
+    G-->>B: presence.snapshot gồm trạng thái của B
     G-->>B: Sẵn sàng nhận tin realtime
     Note over B: Khi đọc/gửi direct, tải backup và khôi phục SK nếu cần
 ```
@@ -452,7 +590,7 @@ JWT xác thực các request HTTP. Vé WebSocket dùng một lần, mặc địn
 
 | Dữ liệu phía client | Nơi lưu |
 | --- | --- |
-| Private keys đã mở, SK, plaintext và cache tin | RAM của tab |
+| Private keys đã mở, SK, plaintext, cache tin và presence | RAM của tab |
 | JWT, username, user UUID, khóa mở vault để reload cùng phiên | `sessionStorage`, xóa khi đăng xuất |
 | UUID/context/envelope/body của tin direct chưa xác nhận | Outbox trong `localStorage`, fallback RAM nếu storage lỗi |
 
@@ -466,6 +604,7 @@ Quên mật khẩu và mất mọi khóa đã mở thì không phục hồi đư
 | Khởi động API / gateway | [`run`](../cmd/main.go), [`run/serve`](../cmd/ws-gateway/main.go) |
 | Handler → service → repository | [router](../internal/route/router.go), [`Send`](../internal/module/message/service/service.go), [transaction gửi tin](../internal/module/message/repository/postgres.go) |
 | Publish, queue, ACK | [`PublishMessage`](../internal/module/message/service/publish.go), [`handleStreams`](../internal/gateway/consumer.go), [`Dispatch/writeLoop`](../internal/gateway/hub.go) |
+| Presence và vòng đời socket | [payload presence](../internal/gateway/presence.go), [`add/remove/writeLoop`](../internal/gateway/hub.go), [client presence](../web/app.js) |
 | Nhóm và membership | [`CreateGroup/ChangeMember`](../internal/module/thread/repository/groups.go), [queries](../db/queries/groups.sql) |
 | Cache thành viên | [`messageRecipients`](../internal/module/message/service/publish.go), [queries tại sequence](../db/queries/messages.sql), [`Redis.Get/Put`](../internal/module/thread/membership/redis.go) |
 | Gộp tin, catch-up và read marker | [realtime core](../web/realtime-core.js), [`loadThreads/flushReadMarker`](../web/app.js), [`MarkRead`](../internal/module/thread/service/service.go) |

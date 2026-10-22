@@ -221,6 +221,25 @@ button:disabled {
   background: #2563eb;
 }
 
+.peer-identity { min-width: 0; overflow-wrap: anywhere; }
+.presence,
+.chat-heading .presence {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 0 0;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.presence::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #94a3b8; }
+.presence-online::before { background: #16a34a; }
+.presence-unknown::before { background: transparent; border: 1px solid #94a3b8; }
+.peer:hover .presence,
+.peer.active .presence { color: #ffffff; }
+
 .chat-heading {
   margin-bottom: 14px;
 }

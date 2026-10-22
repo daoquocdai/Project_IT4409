@@ -44,7 +44,9 @@ function browserFixture(fetchAPI, cache = new Map()) {
       focus() {}, setAttribute() {}, removeAttribute(name) { if (name === "maxlength") this.maxLength = -1; },
       querySelectorAll(selector) {
         const descendants = this.children.flatMap((child) => [child, ...child.querySelectorAll("*")]);
-        return selector === "input:checked" ? descendants.filter((child) => child.tag === "input" && child.checked) : descendants;
+        if (selector === "input:checked") return descendants.filter((child) => child.tag === "input" && child.checked);
+        if (selector === "[data-presence-user-id]") return descendants.filter((child) => "presenceUserId" in child.dataset);
+        return descendants;
       },
       querySelector(selector) { return selector === ".message:last-child"
         ? this.children.filter((item) => item.dataset?.seq).at(-1) : null; },
@@ -55,7 +57,10 @@ function browserFixture(fetchAPI, cache = new Map()) {
   for (const name of ["register", "login"]) nodes.get(name + "-form").elements = {
     username: nodes.get(name + "-username"), password: nodes.get(name + "-password") };
   nodes.get("group-form").elements = { name: nodes.get("group-name") };
-  class Socket { static OPEN = 1; readyState = 0; close() { this.readyState = 3; this.onclose?.(); } }
+  class Socket { static OPEN = 1; readyState = 0;
+    constructor(url) { this.url = url; sockets.push(this); }
+    close() { this.readyState = 3; this.onclose?.(); } }
+  const sockets = [];
   const timers = new Map(), windowEvents = {}, documentEvents = {};
   let timerID = 0, now = 0;
   const context = vm.createContext({ console, crypto, WebAssembly, isSecureContext: true,
@@ -72,7 +77,7 @@ function browserFixture(fetchAPI, cache = new Map()) {
   for (const file of ["e2ee.js", "realtime-core.js", "app.js"]) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, file), "utf8"), context, { filename: file });
   }
-  return { context, nodes, cache, timers, windowEvents, documentEvents,
+  return { context, nodes, cache, timers, sockets, windowEvents, documentEvents,
     run: (code) => vm.runInContext(code, context),
     async advance(milliseconds) {
       const target = now + milliseconds;

@@ -49,7 +49,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parsedID, err := uuid.Parse(userID)
-	if err != nil {
+	if err != nil || parsedID == uuid.Nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

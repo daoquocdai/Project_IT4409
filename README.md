@@ -182,6 +182,7 @@ make wasm
 make test
 make build
 go vet ./...
+go test -race ./internal/gateway
 node --test web/e2ee-client.test.cjs
 ```
 
@@ -210,6 +211,8 @@ Kiểm tra nhanh trên giao diện:
 3. Ngắt mạng B, gửi từ A rồi nối lại; tin thiếu được lấy bù, không lặp UUID. Khởi động lại gateway để kiểm tra reconnect.
 4. Mở hai tab B; đọc thread ở tab đang hiển thị và ở cuối chat, theo dõi unread ở tab còn lại. Direct A nhận summary về marker của B mà không có tin mới.
 5. Đăng ký C sau khi A đã mở web, dùng nút “Làm mới danh sách” để thấy C. Với nhóm, thử tin bị từ chối rồi sửa và gửi; lỗi mạng giữ bản gửi lại cho đến khi được xác nhận.
+6. Kiểm tra nhãn presence của A/B trong sidebar, danh sách mở chat, header direct và panel thành viên nhóm. Mở hai tab B, đóng/đăng xuất một tab: B vẫn trực tuyến; đóng tab cuối: A thấy B ngoại tuyến. Chuyển tab hoặc thu nhỏ cửa sổ không làm B ngoại tuyến.
+7. Ngắt mạng ở phía người xem: các nhãn chuyển thành “Chưa xác định”. Khi nối lại, snapshot phải sửa các thay đổi đã bỏ lỡ. Với mất mạng im lặng của B, theo dõi A phát hiện offline sau chu kỳ Ping/Pong (thường khoảng 15 giây); restart gateway rồi xác nhận snapshot mới vẫn được nhận dù revision thấp hơn trước. Trong lúc thử, giữ draft và lựa chọn thành viên để kiểm tra chúng không bị mất.
 
 ## Tài liệu
 
