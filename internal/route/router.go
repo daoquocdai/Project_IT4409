@@ -48,6 +48,25 @@ type AttachmentHandler interface {
 	Content(c *gin.Context)
 }
 
+type CallHandler interface {
+	Create(c *gin.Context)
+	Get(c *gin.Context)
+	Accept(c *gin.Context)
+	Reject(c *gin.Context)
+	End(c *gin.Context)
+	Connected(c *gin.Context)
+	ICE(c *gin.Context)
+	Signal(c *gin.Context)
+	CreateGroupCall(c *gin.Context)
+	ActiveGroupCall(c *gin.Context)
+	GetGroupCall(c *gin.Context)
+	JoinGroupCall(c *gin.Context)
+	ReadyGroupCall(c *gin.Context)
+	LeaveGroupCall(c *gin.Context)
+	EndGroupCall(c *gin.Context)
+	SignalGroupCall(c *gin.Context)
+}
+
 func New(
 	userHandler UserHandler,
 	threadHandler ThreadHandler,
@@ -57,6 +76,12 @@ func New(
 	authenticate gin.HandlerFunc,
 	attachmentHandlers ...AttachmentHandler,
 ) *gin.Engine {
+	return NewWithCalls(userHandler, threadHandler, messageHandler, wsTicketHandler, e2eeHandler, authenticate, nil, attachmentHandlers...)
+}
+
+func NewWithCalls(userHandler UserHandler, threadHandler ThreadHandler, messageHandler MessageHandler,
+	wsTicketHandler WSTicketHandler, e2eeHandler E2EEHandler, authenticate gin.HandlerFunc,
+	callHandler CallHandler, attachmentHandlers ...AttachmentHandler) *gin.Engine {
 	router := gin.Default()
 
 	if err := router.SetTrustedProxies(nil); err != nil {
@@ -75,6 +100,9 @@ func New(
 	router.StaticFile("/auth.js", "web/auth.js")
 	router.StaticFile("/landing.js", "web/landing.js")
 	router.StaticFile("/realtime-core.js", "web/realtime-core.js")
+	router.StaticFile("/call-api.js", "web/call-api.js")
+	router.StaticFile("/call-manager.js", "web/call-manager.js")
+	router.StaticFile("/group-call-manager.js", "web/group-call-manager.js")
 	router.StaticFile("/e2ee-wasm.js", "web/e2ee-wasm.js")
 	router.StaticFile("/e2ee-state.js", "web/e2ee-state.js")
 	router.StaticFile("/e2ee.js", "web/e2ee.js")
@@ -107,6 +135,24 @@ func New(
 	authenticated.GET("/threads/:id/messages", messageHandler.List)
 	authenticated.POST("/messages/:id/recall", messageHandler.Recall)
 	authenticated.GET("/message-changes", messageHandler.Changes)
+	if callHandler != nil {
+		authenticated.POST("/threads/:id/calls", callHandler.Create)
+		authenticated.GET("/calls/:id", callHandler.Get)
+		authenticated.POST("/calls/:id/accept", callHandler.Accept)
+		authenticated.POST("/calls/:id/reject", callHandler.Reject)
+		authenticated.POST("/calls/:id/end", callHandler.End)
+		authenticated.POST("/calls/:id/connected", callHandler.Connected)
+		authenticated.GET("/calls/:id/ice-config", callHandler.ICE)
+		authenticated.POST("/calls/:id/signal", callHandler.Signal)
+		authenticated.POST("/threads/:id/group-calls", callHandler.CreateGroupCall)
+		authenticated.GET("/threads/:id/group-calls/active", callHandler.ActiveGroupCall)
+		authenticated.GET("/group-calls/:id", callHandler.GetGroupCall)
+		authenticated.POST("/group-calls/:id/join", callHandler.JoinGroupCall)
+		authenticated.POST("/group-calls/:id/ready", callHandler.ReadyGroupCall)
+		authenticated.POST("/group-calls/:id/leave", callHandler.LeaveGroupCall)
+		authenticated.POST("/group-calls/:id/end", callHandler.EndGroupCall)
+		authenticated.POST("/group-calls/:id/signal", callHandler.SignalGroupCall)
+	}
 	if len(attachmentHandlers) > 0 && attachmentHandlers[0] != nil {
 		authenticated.POST("/threads/:id/attachments", attachmentHandlers[0].Upload)
 		authenticated.GET("/attachments/:id/content", attachmentHandlers[0].Content)

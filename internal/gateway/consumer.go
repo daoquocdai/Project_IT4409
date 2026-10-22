@@ -109,6 +109,8 @@ func (c *Consumer) handleStreams(ctx context.Context, streams []redis.XStream) e
 					err = c.hub.DispatchThreadUpdated(*event.threadUpdated)
 				} else if event.messageRecalled != nil {
 					err = c.hub.DispatchRecall(*event.messageRecalled)
+				} else if event.raw != nil {
+					err = c.hub.DispatchRaw(event.raw, event.recipients)
 				} else {
 					err = c.hub.Dispatch(event.messageCreated)
 				}
@@ -128,6 +130,8 @@ type decodedEvent struct {
 	messageCreated  messageevent.MessageCreated
 	messageRecalled *messageevent.MessageRecalled
 	threadUpdated   *threadevent.ThreadUpdated
+	raw             map[string]any
+	recipients      []string
 }
 
 func decode(values map[string]interface{}) (decodedEvent, error) {
@@ -148,9 +152,44 @@ func decode(values map[string]interface{}) (decodedEvent, error) {
 	case messageevent.MessageRecalledType:
 		event, err := decodeMessageRecalled(values)
 		return decodedEvent{messageRecalled: &event}, err
+	case "call.invited", "call.accepted", "call.ended", "call.offer", "call.answer", "call.ice":
+		return decodeCallEvent(typeName, values)
+	case "group-call.started", "group-call.participant-ready", "group-call.participant-left", "group-call.ended", "group-call.offer", "group-call.answer", "group-call.ice":
+		return decodeCallEvent(typeName, values)
 	default:
 		return decodedEvent{}, fmt.Errorf("unsupported event type")
 	}
+}
+
+func decodeCallEvent(eventType string, values map[string]interface{}) (decodedEvent, error) {
+	recipientsText, ok := values["recipient_ids"].(string)
+	var recipients []string
+	if !ok || json.Unmarshal([]byte(recipientsText), &recipients) != nil || len(recipients) == 0 {
+		return decodedEvent{}, fmt.Errorf("invalid call recipients")
+	}
+	for _, id := range recipients {
+		if !validPublicUUID(id) {
+			return decodedEvent{}, fmt.Errorf("invalid call recipient")
+		}
+	}
+	callID, ok := values["call_id"].(string)
+	if !ok || !validPublicUUID(callID) {
+		return decodedEvent{}, fmt.Errorf("invalid call_id")
+	}
+	payload := map[string]any{"type": eventType, "call_id": callID}
+	for _, key := range []string{"event_id", "thread_id", "caller_id", "callee_id", "caller_name", "media_type", "status", "end_reason", "ring_expires_at", "sender_id", "from_session_id", "target_session_id"} {
+		if value, exists := values[key].(string); exists {
+			payload[key] = value
+		}
+	}
+	if raw, exists := values["payload"].(string); exists {
+		var value any
+		if json.Unmarshal([]byte(raw), &value) != nil {
+			return decodedEvent{}, fmt.Errorf("invalid call payload")
+		}
+		payload["payload"] = value
+	}
+	return decodedEvent{raw: payload, recipients: recipients}, nil
 }
 
 func decodeMessageRecalled(values map[string]interface{}) (messageevent.MessageRecalled, error) {

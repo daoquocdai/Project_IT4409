@@ -1,221 +1,290 @@
-# Mini-Hermes Chat API
+# Mini Hermes
 
-Mini-Hermes gồm hai tiến trình Go: HTTP API xử lý nghiệp vụ và lưu PostgreSQL; gateway nhận sự kiện qua Redis Streams rồi phát WebSocket. Direct (chat hai người) dùng mã hóa đầu cuối E2EE tại browser qua Go/WASM; nhóm lưu và truyền plaintext.
+Mini Hermes là ứng dụng nhắn tin thời gian thực gồm chat cá nhân, chat nhóm, gửi tệp, thu hồi tin nhắn và gọi thoại/video 1–1 hoặc theo nhóm. Backend viết bằng Go; PostgreSQL lưu dữ liệu nghiệp vụ; Redis Streams vận chuyển sự kiện tới WebSocket Gateway; giao diện dùng HTML, CSS và JavaScript thuần. Chat cá nhân và tệp đính kèm sử dụng mã hóa đầu cuối tại trình duyệt qua Go WebAssembly.
 
-Mỗi direct khởi tạo X3DH một lần, dùng phiên khóa cố định và dẫn xuất khóa riêng cho từng tin. Đúng username/mật khẩu cho phép khôi phục khóa và lịch sử trên tab, thiết bị hoặc phiên ẩn danh mới; nhiều thiết bị có thể hoạt động đồng thời. Quyết định và giới hạn nằm trong [ADR 005](docs/adr/005-recoverable-e2ee-sessions.md).
+## Kiến trúc hệ thống
 
-## Chạy toàn bộ bằng Docker
+```mermaid
+flowchart LR
+    B["Trình duyệt<br/>JavaScript + E2EE WASM + WebRTC"]
+    API["HTTP API :8080<br/>Gin / Go"]
+    GW["WebSocket Gateway :8081"]
+    DB[("PostgreSQL 16<br/>nghiệp vụ + outbox")]
+    R[("Redis 7<br/>Streams + ticket + cache")]
+    FS[("attachment_data<br/>ciphertext tệp")]
+    B -->|"JWT + REST"| API
+    B <-->|"vé một lần + WebSocket"| GW
+    API --> DB
+    API --> FS
+    API -->|XADD| R
+    R -->|XREADGROUP| GW
+    GW -->|realtime| B
+    B <-->|"WebRTC P2P / Mesh"| B
+```
 
-Đây là cách đơn giản nhất và chỉ yêu cầu Docker Desktop có Docker Compose v2. Không cần cài Go, Goose, GNU Make, Node.js, PostgreSQL hay Redis trên máy. Lần chạy đầu tiên vẫn cần Internet để Docker tải image và Go module trong quá trình build.
+### Các thành phần
 
-Tại thư mục dự án, chạy:
+| Thành phần | Trách nhiệm |
+| --- | --- |
+| Web client | Giao diện, cache hội thoại, E2EE, attachment, WebSocket và WebRTC. Mã hóa/giải mã diễn ra tại trình duyệt. |
+| HTTP API | Xác thực JWT, kiểm tra quyền, transaction PostgreSQL, upload/download ciphertext, quản lý cuộc gọi và xác thực signaling. |
+| WebSocket Gateway | Xác thực bằng vé dùng một lần, đọc Redis Stream và định tuyến sự kiện tới các kết nối của đúng người nhận. Không xử lý media. |
+| PostgreSQL | Nguồn dữ liệu chuẩn cho tài khoản, hội thoại, tin nhắn, khóa E2EE, attachment, thu hồi và cuộc gọi. |
+| Redis | Event bus API → Gateway, cache membership và vé WebSocket ngắn hạn; không phải nơi lưu lịch sử chuẩn. |
+| Attachment volume | Lưu ciphertext của tệp; metadata và quyền truy cập nằm trong PostgreSQL. |
+| Migration container | Chạy Goose trước API/Gateway để cập nhật schema. |
+
+### Luồng tin nhắn và realtime
+
+```mermaid
+sequenceDiagram
+    participant C as Browser
+    participant A as HTTP API
+    participant P as PostgreSQL
+    participant R as Redis Stream
+    participant G as Gateway
+    C->>A: POST tin nhắn + UUID
+    A->>P: Kiểm tra quyền, khóa thread, cấp seq, lưu tin
+    P-->>A: Commit
+    A->>R: message.created + recipient_ids
+    R->>G: XREADGROUP
+    G-->>C: WebSocket realtime
+    G->>R: XACK
+```
+
+- PostgreSQL được ghi trước khi phát realtime.
+- UUID do client tạo giúp retry không sinh tin trùng; `seq` quyết định thứ tự trong từng thread.
+- Khi WebSocket gián đoạn, client lấy bù lịch sử qua REST.
+- Thu hồi giữ ID/vị trí nhưng xóa payload cũ khỏi dữ liệu phục vụ; thiết bị offline đồng bộ qua cursor thay đổi.
+
+### Xác thực và bảo mật
+
+- Mật khẩu gốc không gửi tới backend. Browser dùng Argon2id và HKDF để tạo credential cùng khóa mở vault.
+- Server lưu hash credential; JWT xác định actor bằng claim `sub`, không tin `sender_id` trong body.
+- WebSocket dùng vé một lần, mặc định hết hạn sau 30 giây và được tiêu thụ nguyên tử trong Redis.
+- Chat cá nhân dùng X3DH và AES-256-GCM. Private key nằm trong vault mã hóa; khóa phiên có backup mã hóa.
+- Tệp direct được mã hóa tại browser; server và volume chỉ nhận ciphertext.
+- Download luôn kiểm tra membership, thu hồi, hạn dùng và trạng thái xóa.
+- Signaling cuộc gọi đi qua API có JWT; backend kiểm tra người gọi, phòng và session nguồn/đích.
+- Production phải thay secret mặc định, dùng HTTPS/WSS và cấu hình TURN.
+
+### Dữ liệu và vị trí lưu
+
+| Nhóm | Bảng/chỗ lưu | Nội dung |
+| --- | --- | --- |
+| Tài khoản | `users`, `prekeys` | Username, credential hash, KDF, public bundle, vault mã hóa và prekey. |
+| Hội thoại | `threads`, `participants` | Direct/group, role, khoảng membership, read marker và sequence. |
+| Tin nhắn | `messages`, `message_change_events` | Text/system, envelope E2EE, metadata, recall và cursor thay đổi. |
+| Tệp | `attachments` + volume `attachment_data` | Metadata/quyền trong DB; ciphertext vật lý trong volume. |
+| E2EE | `e2ee_epochs`, `e2ee_epoch_backups` | Bootstrap và backup khóa phiên mã hóa. |
+| Gọi 1–1 | `calls`, `active_call_users`, `call_events` | Trạng thái, busy lock và outbox. |
+| Gọi nhóm | `group_calls`, `group_call_sessions`, `group_call_events` | Phòng, session thiết bị, version và outbox. |
+
+### Cấu trúc mã nguồn
+
+```text
+Project_IT4409/
+├── cmd/
+│   ├── main.go                    # HTTP API
+│   ├── ws-gateway/                # WebSocket Gateway
+│   └── e2ee-wasm/                 # entrypoint Go/WASM
+├── config/                        # cấu hình mẫu
+├── db/
+│   ├── migrations/                # migration Goose
+│   └── queries/                   # truy vấn sqlc
+├── internal/
+│   ├── database/sqlc/             # mã truy vấn được sinh
+│   ├── e2ee/                      # X3DH, AES-GCM, vault, epoch
+│   ├── gateway/                   # Redis consumer và WebSocket hub
+│   ├── middleware/                # Bearer JWT
+│   ├── module/
+│   │   ├── attachment/            # upload/download/cleanup
+│   │   ├── call/                  # gọi 1–1 và nhóm
+│   │   ├── e2ee/                  # bundle/epoch/backup
+│   │   ├── message/               # gửi/lịch sử/thu hồi/outbox
+│   │   ├── thread/                # direct/group/membership/read
+│   │   └── user/                  # đăng ký/đăng nhập
+│   ├── route/                     # Gin router và integration test
+│   ├── token/                     # JWT HS256
+│   └── wsticket/                  # vé WebSocket một lần
+├── web/                           # UI, realtime, E2EE và WebRTC
+├── docs/                          # kiến trúc, ERD, ADR
+├── Dockerfile
+└── docker-compose.yml
+```
+
+### Công nghệ và thư viện
+
+| Công nghệ | Vai trò |
+| --- | --- |
+| Go 1.27 | API, Gateway, worker và E2EE/WASM. |
+| Gin | Router, middleware, JSON và multipart API. |
+| pgx v5 / PostgreSQL 16 | Query, transaction, constraint và transactional outbox. |
+| go-redis v9 / Redis 7 | Streams, cache membership và WS ticket. |
+| coder/websocket | WebSocket, heartbeat và dispatch. |
+| google/uuid | Public ID, request/session/device ID. |
+| libsignal, x/crypto | X3DH, Argon2id, HKDF và primitive mật mã. |
+| Go WebAssembly | Chạy E2EE Go trong browser. |
+| WebRTC API | Media P2P 1–1 và Mesh tối đa 4 người. |
+| Goose | Migration trong container `migrate`. |
+| Docker Compose | Chạy toàn bộ hệ thống. |
+
+## Chạy dự án bằng Docker
+
+Chỉ cần Docker Desktop có Docker Compose v2. Không cần cài riêng Go, PostgreSQL, Redis, Node.js, Goose hoặc Make. Lần build đầu cần Internet để tải image và Go module.
 
 ```powershell
 Set-Location 'D:\DATA\Visual\Project_IT4409'
-docker compose up --build -d
+docker compose up -d --build
 ```
 
-Compose sẽ tự build API, WebSocket gateway và E2EE WebAssembly; chờ PostgreSQL/Redis sẵn sàng; chạy migration; sau đó khởi động ứng dụng. Ciphertext của tệp đính kèm được giữ trong volume `attachment_data`, vì vậy vẫn còn khi container API được tạo lại.
+Địa chỉ:
 
-Kiểm tra trạng thái, log và API:
+- Landing: `http://localhost:8080`
+- Đăng nhập: `http://localhost:8080/login`
+- Ứng dụng: `http://localhost:8080/app`
+- Gateway: `ws://localhost:8081/ws`
 
-```powershell
-docker compose ps
-docker compose logs -f api gateway migrate
-Invoke-RestMethod http://localhost:8080/health
-```
-
-Khi health endpoint trả `{"status":"ok"}`, mở `http://localhost:8080`.
-
-Compose có JWT secret mặc định chỉ dành cho local. Khi cần đặt secret riêng, dùng cùng một giá trị cho API và gateway thông qua biến sau:
-
-```powershell
-$env:MINI_HERMES_JWT_SECRET = 'thay-bang-secret-ngau-nhien-dai-cua-ban'
-docker compose up --build -d
-```
-
-Khởi động lại không cần build:
+Khởi động lại không build:
 
 ```powershell
 docker compose up -d
 ```
 
-Dừng và giữ dữ liệu PostgreSQL:
+Dừng và giữ dữ liệu:
 
 ```powershell
 docker compose down
 ```
 
-Chỉ khi muốn xóa toàn bộ dữ liệu local:
+Xóa cả PostgreSQL và attachment volume:
 
 ```powershell
 docker compose down -v
 ```
 
-Lệnh `down -v` xóa cả PostgreSQL và tệp đính kèm. Hãy sao lưu hai volume trước khi dùng trong môi trường có dữ liệu cần giữ.
+> `down -v` xóa dữ liệu không thể phục hồi từ Docker volume.
 
-## Chạy local bằng công cụ trên máy
-
-Cần Go theo [go.mod](go.mod), Docker Compose, GNU Make và `goose` trên PATH. Node.js có `fetch` và WebSocket dùng cho kiểm thử client. `sqlc` chỉ cần khi sinh lại mã truy vấn. Browser cần secure context, WebAssembly và `crypto.randomUUID`; `localhost` đáp ứng secure context.
-
-Tại thư mục repository, chạy bằng PowerShell:
+Đặt JWT secret riêng:
 
 ```powershell
-Copy-Item config/config.yml.example config/config.yml
-# Đổi auth.jwt_secret trong config/config.yml thành secret ngẫu nhiên trước khi chạy.
-make up
-$env:DATABASE_URL = 'postgres://chat:chat@localhost:5432/chat_api?sslmode=disable'
-make migrate
-make wasm
+$env:MINI_HERMES_JWT_SECRET = 'mot-secret-ngau-nhien-dai-va-khong-cong-khai'
+docker compose up -d --build
 ```
 
-Mở hai terminal tại repository:
-
-```powershell
-# Terminal API
-make run
-```
-
-```powershell
-# Terminal gateway
-make gateway
-```
-
-Mở `http://localhost:8080`, đăng ký A/B trên hai profile trình duyệt rồi chat. Đăng ký tự tạo và sao lưu khóa, không cần upload bundle thủ công. Có thể dùng `go run ./cmd` và `go run ./cmd/ws-gateway` thay cho hai target chạy server.
-
-API/gateway đọc `config/config.yml`; `DATABASE_URL` chỉ truyền cho migration. Nếu thay database URL, sửa cả config và biến môi trường. `make migrate-status` xem phiên bản schema; `make sqlc` sinh lại truy vấn. Target `wasm` có nhánh Windows/PowerShell, tạo `web/e2ee.wasm` và `web/wasm_exec.js` từ cùng Go toolchain. Khi đổi host, cập nhật `ws_public_url`, `ws_allowed_origins`; dùng HTTPS/WSS ngoài localhost.
-
-### Reset dữ liệu local (tùy chọn)
-
-Chỉ reset database phát triển khi cần xóa fixture hoặc nâng tài khoản/schema cũ không có encrypted vault. Database mới không cần reset mỗi lần chạy. Migration `20261009100000` yêu cầu tài khoản cũ đã được xóa, không chuyển đổi khóa tự động; migration `down` không phục hồi dữ liệu bị xóa.
-
-Dừng API/gateway. Với schema hiện tại và Docker Compose mặc định:
-
-```powershell
-docker compose exec -T postgres psql -U chat -d chat_api -v ON_ERROR_STOP=1 -c "TRUNCATE TABLE messages, participants, threads, prekeys, users, e2ee_epochs, e2ee_epoch_backups RESTART IDENTITY CASCADE;"
-make migrate
-
-# Dùng đúng redis.stream và redis.database trong config; dưới đây là cấu hình mẫu.
-$chatStream = 'mini-hermes:events'
-docker compose exec -T redis redis-cli -n 0 DEL $chatStream
-docker compose exec -T redis redis-cli -n 0 --scan --pattern "${chatStream}:membership:*" | ForEach-Object { docker compose exec -T redis redis-cli -n 0 DEL $_ }
-docker compose exec -T redis redis-cli -n 0 --scan --pattern 'mini-hermes:ws-ticket:*' | ForEach-Object { docker compose exec -T redis redis-cli -n 0 DEL $_ }
-```
-
-Nếu nâng schema cũ chưa có bảng epoch, truncate năm bảng `messages, participants, threads, prekeys, users` với `RESTART IDENTITY CASCADE` trước `make migrate`. Chỉ xóa Redis key của dự án. Gateway tạo lại consumer group khi khởi động. Đăng xuất rồi đăng ký lại; tài khoản mới có UUID mới nên không sử dụng outbox của tài khoản đã xóa.
+API và Gateway phải dùng cùng secret. Ngoài localhost cần HTTPS, WSS, origin phù hợp và TURN server.
 
 ## HTTP API
 
-Các endpoint nghiệp vụ yêu cầu `Authorization: Bearer <access_token>`; `/health` và ba endpoint auth đầu tiên công khai. Actor lấy từ JWT `sub`, không lấy từ body. Auth chỉ nhận credential dẫn xuất, không nhận mật khẩu gốc. Router: [`route.New`](internal/route/router.go).
+Trừ health và auth, endpoint nghiệp vụ yêu cầu `Authorization: Bearer <access_token>`.
 
-| Method | Path | Chức năng / request chính |
+### Xác thực và realtime
+
+| Method | Endpoint | Chức năng |
 | --- | --- | --- |
-| `GET` | `/health` | `{"status":"ok"}` |
-| `GET` | `/auth/params?username=...` | Username chuẩn hóa và KDF công khai |
-| `POST` | `/auth/register` | `username`, `auth_credential`, `kdf`, `public_bundle`, `account_vault` |
-| `POST` | `/auth/login` | `username`, `auth_credential`; trả JWT, `token_type`, `user_id` |
-| `GET` | `/users` | Danh sách tài khoản |
-| `POST` | `/auth/ws-ticket` | Vé WebSocket một lần và URL gateway |
-| `GET` | `/e2ee/account` | Vault và public bundle gốc của actor |
-| `POST` | `/threads/direct` | Tạo/mở direct bằng `peer_id` |
-| `POST` | `/threads/group` | Tạo nhóm bằng `name`, `member_ids` |
-| `GET` | `/threads` | Summary các thread đang tham gia, read marker và unread |
-| `GET` | `/threads/:id/members` | Thành viên nhóm |
-| `POST` | `/threads/:id/members` | Admin thêm `user_id` |
-| `DELETE` | `/threads/:id/members/:user_id` | Admin xóa người khác |
-| `POST` | `/threads/:id/leave` | Rời nhóm |
-| `POST` | `/e2ee/bundles/:user_id/claim` | Claim bundle peer; body `thread_id` |
-| `GET` | `/threads/:id/epochs` | Bootstrap, backup của actor và `current_epoch_id` |
-| `POST` | `/threads/:id/epochs` | Khởi tạo phiên cố định: `epoch_id`, `bootstrap`, `key_backup` |
-| `PUT` | `/threads/:id/epochs/:epoch_id/key` | Lưu backup; trả bản đã commit |
-| `GET` | `/threads/:id/messages` | Lịch sử với `before_seq`, `limit` |
-| `POST` | `/threads/:id/messages` | `message_id`, `content_format`, `content`, tùy chọn `attachment_ids` |
-| `POST` | `/threads/:id/attachments` | Upload một ciphertext multipart trường `file`, tối đa 20 MiB + tag GCM |
-| `GET` | `/attachments/:id/content` | Tải ciphertext sau khi kiểm tra quyền xem tin nhắn |
-| `PUT` | `/threads/:id/read` | Tăng `last_read_seq` |
+| `GET` | `/health` | Health check. |
+| `GET` | `/auth/params?username=...` | KDF profile công khai. |
+| `POST` | `/auth/register` | Đăng ký cùng credential, bundle và vault. |
+| `POST` | `/auth/login` | Đăng nhập và trả JWT. |
+| `POST` | `/auth/ws-ticket` | Vé WebSocket dùng một lần. |
+| `GET` | `/users` | Danh sách người dùng. |
 
-Gateway nhận `GET /ws?ticket=...`; client ngoài browser cũng có thể dùng Bearer JWT trong header. Claim/epoch APIs chỉ áp dụng cho direct. Payload mật mã được giải thích tại [luồng E2EE](docs/project-flows.md#e2ee-phiên-cố-định-và-khôi-phục).
+### Hội thoại, tin nhắn và tệp
 
-Tệp direct được mã hóa AES-256-GCM ngay trong browser bằng khóa/IV mới cho từng tệp. Server chỉ nhận ciphertext; tên, MIME, khóa và IV nằm trong nội dung tin nhắn E2EE. Bản hiện tại chưa cho gửi tệp trong nhóm vì nhóm vẫn dùng plaintext. Tệp upload nhưng chưa gắn vào tin nhắn được đánh dấu `pending` và dọn sau 24 giờ.
+| Method | Endpoint | Chức năng |
+| --- | --- | --- |
+| `POST` | `/threads/direct` | Tạo/mở chat cá nhân. |
+| `POST` | `/threads/group` | Tạo nhóm. |
+| `GET` | `/threads` | Danh sách hội thoại và unread. |
+| `GET/POST` | `/threads/:id/members` | Xem/thêm thành viên. |
+| `DELETE` | `/threads/:id/members/:user_id` | Xóa thành viên. |
+| `POST` | `/threads/:id/leave` | Rời nhóm. |
+| `GET/POST` | `/threads/:id/messages` | Lịch sử/gửi tin. |
+| `PUT` | `/threads/:id/read` | Cập nhật read marker. |
+| `POST` | `/messages/:id/recall` | Thu hồi tin của actor. |
+| `GET` | `/message-changes` | Đồng bộ thay đổi theo cursor. |
+| `POST` | `/threads/:id/attachments` | Upload ciphertext tối đa 20 MiB + tag. |
+| `GET` | `/attachments/:id/content` | Download có kiểm tra quyền. |
 
-## Sơ đồ sequence tóm tắt
+### E2EE
 
-Tin được lưu trước khi phát realtime. WebSocket bao gồm các thiết bị của sender; client gộp UUID và lấy bù REST khi thiếu tin.
+| Method | Endpoint | Chức năng |
+| --- | --- | --- |
+| `GET` | `/e2ee/account` | Vault và public bundle của actor. |
+| `POST` | `/e2ee/bundles/:user_id/claim` | Claim prekey peer. |
+| `GET/POST` | `/threads/:id/epochs` | Đọc/tạo epoch. |
+| `PUT` | `/threads/:id/epochs/:epoch_id/key` | Lưu backup khóa phiên. |
 
-```mermaid
-sequenceDiagram
-    participant C as Browser
-    participant A as API / PostgreSQL
-    participant R as Redis Stream
-    participant G as Gateway
-    C->>A: POST messages với UUID và payload
-    A->>A: Kiểm tra quyền, khóa thread, tăng seq, commit
-    A->>R: message.created và snapshot recipient_ids
-    R->>G: XREADGROUP
-    G-->>C: WebSocket tới mọi kết nối của các bên
-    G->>R: XACK sau xử lý
-    A-->>C: Message đã lưu
-```
+### Gọi 1–1
 
-Thay đổi thành viên nhóm và system message dùng chung transaction và thứ tự `seq` với tin text.
+| Method | Endpoint | Chức năng |
+| --- | --- | --- |
+| `POST` | `/threads/:id/calls` | Tạo audio/video call. |
+| `GET` | `/calls/:id` | Trạng thái call. |
+| `POST` | `/calls/:id/accept` | Chấp nhận. |
+| `POST` | `/calls/:id/reject` | Từ chối. |
+| `POST` | `/calls/:id/connected` | Báo media đã kết nối. |
+| `POST` | `/calls/:id/end` | Kết thúc/hủy. |
+| `GET` | `/calls/:id/ice-config` | ICE servers. |
+| `POST` | `/calls/:id/signal` | Offer/answer/ICE. |
 
-```mermaid
-sequenceDiagram
-    participant C as Thành viên / admin
-    participant A as API / PostgreSQL
-    participant G as Redis / gateway
-    C->>A: Tạo nhóm, thêm, xóa hoặc rời
-    A->>A: Kiểm tra role và cập nhật membership
-    A->>A: Tạo system message, commit
-    A->>G: message.created tại seq của system message
-    G-->>C: Realtime, client tải lại summary / members
-```
+### Gọi nhóm
 
-Các bước chi tiết, X3DH và phục hồi nằm trong [tài liệu luồng](docs/project-flows.md).
+| Method | Endpoint | Chức năng |
+| --- | --- | --- |
+| `POST` | `/threads/:id/group-calls` | Tạo/lấy phòng mở. |
+| `GET` | `/threads/:id/group-calls/active` | Phòng hiện tại. |
+| `GET` | `/group-calls/:id` | Snapshot phòng. |
+| `POST` | `/group-calls/:id/join` | Tạo session `joining`. |
+| `POST` | `/group-calls/:id/ready` | Chuyển sang `ready`. |
+| `POST` | `/group-calls/:id/leave` | Rời phòng. |
+| `POST` | `/group-calls/:id/end` | Creator kết thúc cho tất cả. |
+| `POST` | `/group-calls/:id/signal` | Signaling tới session đích. |
+
+Chi tiết xem [Kiến trúc gọi thoại và video](docs/calling-architecture.md).
 
 ## Kiểm tra
 
-Unit test Go và client fixture không cần dịch vụ đang chạy. Build WASM trước fixture test; fixture dùng crypto Go/WASM thật và API mô phỏng. Phần HTTP thật của bộ client được bỏ qua khi chưa đặt `CHAT_API_TEST_URL`.
-
 ```powershell
-make wasm
-make test
-make build
-go vet ./...
-node --test web/e2ee-client.test.cjs
+docker compose ps
+docker compose logs --tail 100 api gateway migrate
+Invoke-RestMethod http://localhost:8080/health
 ```
 
-Integration Go cần PostgreSQL/Redis local và schema đã migrate; bài test tự tạo HTTP server nên không cần tiến trình API/gateway đang chạy:
+Kết quả health mong đợi: `{"status":"ok"}`.
+
+`Dockerfile` chạy `go test ./...` trước khi build binary. Chạy lại toàn bộ test bằng:
 
 ```powershell
-$env:CHAT_API_INTEGRATION = '1'
-go test ./internal/route -count=1
-Remove-Item Env:CHAT_API_INTEGRATION
+docker compose build --no-cache api gateway
 ```
 
-Integration client cần cả PostgreSQL, Redis, API và gateway đang chạy:
+Kiểm tra thủ công:
 
-```powershell
-$env:CHAT_API_TEST_URL = 'http://localhost:8080'
-node --test web/e2ee-client.test.cjs
-Remove-Item Env:CHAT_API_TEST_URL
-```
-
-Các bài tích hợp tạo tài khoản/nhóm thử trong database phát triển. Chúng kiểm tra khởi tạo đồng thời, phiên cố định, nhiều thiết bị, recipient offline, khôi phục từ client trống, retry cùng UUID/seq và HTTP/Redis/WebSocket. Có thể dùng [reset tùy chọn](#reset-dữ-liệu-local-tùy-chọn) sau kiểm thử.
-
-Kiểm tra nhanh trên giao diện:
-
-1. A/B đăng ký ở hai profile, mở direct và gửi hai chiều; reload và đăng nhập B bằng mật khẩu trên profile mới để đọc lại cả tin gửi/nhận.
-2. A tạo nhóm với B; thêm, xóa rồi thêm lại B. B chỉ đọc lịch sử thuộc các lần tham gia; khi admin rời, thành viên còn lại sớm nhất được chuyển quyền nếu cần.
-3. Ngắt mạng B, gửi từ A rồi nối lại; tin thiếu được lấy bù, không lặp UUID. Khởi động lại gateway để kiểm tra reconnect.
-4. Mở hai tab B; đọc thread ở tab đang hiển thị và ở cuối chat, theo dõi unread ở tab còn lại. Direct A nhận summary về marker của B mà không có tin mới.
-5. Đăng ký C sau khi A đã mở web, dùng nút “Làm mới danh sách” để thấy C. Với nhóm, thử tin bị từ chối rồi sửa và gửi; lỗi mạng giữ bản gửi lại cho đến khi được xác nhận.
+1. Hai tài khoản gửi tin hai chiều, reload và kiểm tra lịch sử.
+2. Ngắt mạng một bên rồi kết nối lại; client lấy bù mà không nhân đôi UUID.
+3. Thu hồi text/emoji/attachment; payload cũ biến mất và download mới bị chặn.
+4. Gọi 1–1 hai chiều rồi kết thúc; lịch sử có system message.
+5. Cho 2–4 tài khoản gọi nhóm; người vào muộn kết nối được với peer hiện có.
+6. Một người rời không đóng phòng; vào lại có session mới; người thứ 5 nhận `409`.
+7. Kiểm tra Wi‑Fi/4G sau khi cấu hình TURN.
 
 ## Tài liệu
 
-Đọc theo thứ tự:
+1. [Kiến trúc và luồng nghiệp vụ](docs/project-flows.md)
+2. [Kiến trúc gọi thoại/video](docs/calling-architecture.md)
+3. [ERD và ràng buộc dữ liệu](docs/chat-api-erd.md)
+4. [ADR 001 — Gateway và Redis Stream](docs/adr/001-gateway-and-stream.md)
+5. [ADR 002 — Unread và read marker](docs/adr/002-unread-count.md)
+6. [ADR 003 — Thứ tự và retry](docs/adr/003-message-order.md)
+7. [ADR 005 — E2EE có khả năng phục hồi](docs/adr/005-recoverable-e2ee-sessions.md)
 
-1. [Luồng dự án](docs/project-flows.md): kiến trúc, nghiệp vụ, realtime, E2EE và dữ liệu client.
-2. [ERD](docs/chat-api-erd.md): schema, quan hệ và ràng buộc.
-3. Các quyết định: [ADR 001 — gateway/Stream](docs/adr/001-gateway-and-stream.md), [ADR 002 — unread/read marker](docs/adr/002-unread-count.md), [ADR 003 — thứ tự/retry](docs/adr/003-message-order.md), [ADR 005 — E2EE và phục hồi](docs/adr/005-recoverable-e2ee-sessions.md).
-4. [ADR 004](docs/adr/004-e2ee-without-double-ratchet.md) chỉ ghi lại thiết kế E2EE đã được thay thế.
+## Giới hạn và lưu ý
+
+- Gọi nhóm dùng Mesh tối đa 4 người; phòng lớn cần SFU như LiveKit, Janus hoặc mediasoup.
+- Cấu hình hiện tại chỉ có STUN công cộng; production cần TURN với credential ngắn hạn.
+- Gateway hiện phù hợp một consumer ổn định; scale ngang cần định tuyến connection ownership.
+- Chat nhóm hiện là plaintext; E2EE áp dụng cho direct chat và attachment direct.
+- Redis không phải nơi lưu lịch sử; PostgreSQL luôn là nguồn dữ liệu chuẩn.
+- Secret mặc định trong Compose chỉ dành cho local.
+- WebRTC cần secure context: localhost được phép, production phải dùng HTTPS/WSS.

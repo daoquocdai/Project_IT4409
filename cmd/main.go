@@ -9,6 +9,7 @@ import (
 	authmiddleware "github.com/daoquocdai/chat-api/internal/middleware"
 	attachmenthandler "github.com/daoquocdai/chat-api/internal/module/attachment/handler"
 	attachmentrepository "github.com/daoquocdai/chat-api/internal/module/attachment/repository"
+	callmodule "github.com/daoquocdai/chat-api/internal/module/call"
 	e2eehandler "github.com/daoquocdai/chat-api/internal/module/e2ee/handler"
 	e2eerepository "github.com/daoquocdai/chat-api/internal/module/e2ee/repository"
 	e2eeservice "github.com/daoquocdai/chat-api/internal/module/e2ee/service"
@@ -109,14 +110,19 @@ func run() error {
 
 	wsTicketService := wsticket.NewService(wsticket.NewRedisRepository(redisClient), cfg.WSTicketTTL)
 	wsTicketHandler := wsticket.NewHandler(wsTicketService, cfg.WSPublicURL, cfg.Redis.PublishTimeout)
+	callRepository := callmodule.NewRepository(pool)
+	callPublisher := callmodule.NewPublisher(redisClient, cfg.Redis.Stream)
+	callHandler := callmodule.NewHandler(callRepository, callPublisher)
+	callmodule.StartWorkers(ctx, callRepository, callPublisher)
 
-	router := route.New(
+	router := route.NewWithCalls(
 		userHandler,
 		threadHandler,
 		messageHandler,
 		wsTicketHandler,
 		e2eeHandler,
 		authmiddleware.RequireAuthentication(jwtManager),
+		callHandler,
 		attachmentHandler,
 	)
 

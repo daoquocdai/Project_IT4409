@@ -729,7 +729,7 @@ test("real HTTP/Redis/WebSocket round trip and password-only history recovery", 
     if (options.body) headers.set("Content-Type", "application/json");
     calls.push({ url, body: options.body });
     const response = await nativeFetch(base + url, { ...options, headers });
-    const body = await response.json();
+    const body = response.status === 204 ? null : await response.json();
     if (!response.ok) throw Object.assign(new Error("API " + response.status + " " + (options.method || "GET") + " " + url),
       { status: response.status, details: body });
     return body;
@@ -762,7 +762,7 @@ test("real HTTP/Redis/WebSocket round trip and password-only history recovery", 
     sockets.push(socket);
     const events = [];
     socket.addEventListener("message", (event) => {
-      try { const value = JSON.parse(event.data); if (value.type === "message.created") events.push(value); } catch (_) {}
+      try { const value = JSON.parse(event.data); if (value.type !== "heartbeat") events.push(value); } catch (_) {}
     });
     await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("gateway connect timeout")), 5000);
@@ -780,11 +780,45 @@ test("real HTTP/Redis/WebSocket round trip and password-only history recovery", 
     }
     throw new Error("gateway message delivery timeout");
   }
+  async function callEventFor(events, type, id) {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const value = events.find((event) => event.type === type && event.call_id === id);
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("gateway call event delivery timeout");
+  }
   try {
     const aliceName = await register("a"), bobName = await register("b"), offlineName = await register("c");
     const a1 = await login(aliceName), a2 = await login(aliceName), b1 = await login(bobName);
     const [eventsA1, eventsA2, eventsB] = await Promise.all([connect(a1), connect(a2), connect(b1)]);
     const thread = await a1.request("/threads/direct", { method: "POST", body: JSON.stringify({ peer_id: b1.id }) });
+    const requestID = crypto.randomUUID();
+    const createdCall = await a1.request("/threads/" + thread.id + "/calls", { method: "POST",
+      body: JSON.stringify({ mediaType: "audio", clientRequestId: requestID }) });
+    assert.equal(createdCall.status, "ringing");
+    const retriedCall = await a1.request("/threads/" + thread.id + "/calls", { method: "POST",
+      body: JSON.stringify({ mediaType: "audio", clientRequestId: requestID }) });
+    assert.equal(retriedCall.id, createdCall.id);
+    assert.equal((await callEventFor(eventsB, "call.invited", createdCall.id)).caller_id, a1.id);
+    assert.equal(eventsA1.some((event) => event.type === "call.invited" && event.call_id === createdCall.id), false,
+      "caller must never receive its own invitation and switch roles");
+    const acceptedCall = await b1.request("/calls/" + createdCall.id + "/accept", { method: "POST" });
+    assert.equal(acceptedCall.status, "connecting");
+    await callEventFor(eventsA1, "call.accepted", createdCall.id);
+    await a1.request("/calls/" + createdCall.id + "/signal", { method: "POST",
+      body: JSON.stringify({ type: "call.offer", payload: { type: "offer", sdp: "fixture-offer" } }) });
+    assert.equal((await callEventFor(eventsB, "call.offer", createdCall.id)).payload.sdp, "fixture-offer");
+    await b1.request("/calls/" + createdCall.id + "/signal", { method: "POST",
+      body: JSON.stringify({ type: "call.answer", payload: { type: "answer", sdp: "fixture-answer" } }) });
+    assert.equal((await callEventFor(eventsA2, "call.answer", createdCall.id)).payload.sdp, "fixture-answer");
+    await a1.request("/calls/" + createdCall.id + "/connected", { method: "POST" });
+    const endedCall = await b1.request("/calls/" + createdCall.id + "/end", { method: "POST", body: JSON.stringify({ reason: "completed" }) });
+    assert.equal(endedCall.status, "ended");
+    await callEventFor(eventsA2, "call.ended", createdCall.id);
+    const callHistory = await a1.request("/threads/" + thread.id + "/messages?limit=100");
+    assert.ok(callHistory.messages.some((message) => message.kind === "system" && message.content.includes("Cuộc gọi thoại")));
     const ab = { id: thread.id, kind: "direct", peer: { id: b1.id } };
     const ba = { id: thread.id, kind: "direct", peer: { id: a1.id } };
     const [sent, replied] = await Promise.all([a1.client.send(ab, "real A first"), b1.client.send(ba, "real B first")]);
@@ -820,7 +854,7 @@ test("real HTTP/Redis/WebSocket round trip and password-only history recovery", 
     localStorage.clear();
     const aFresh = await login(aliceName);
     const history = await aFresh.request("/threads/" + thread.id + "/messages?limit=100");
-    for (const message of history.messages) {
+    for (const message of history.messages.filter((item) => item.kind === "text")) {
       const view = await aFresh.client.receive(ab, message);
       assert.ok(view.status === "ready", "fresh browser must read both directions using the restored session");
     }

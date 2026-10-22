@@ -231,6 +231,22 @@ func (h *Hub) DispatchRecall(event messageevent.MessageRecalled) error {
 	return nil
 }
 
+func (h *Hub) DispatchRaw(payload map[string]any, recipients []string) error {
+	for _, recipientID := range recipients {
+		copy := make(map[string]any, len(payload)+1)
+		for key, value := range payload {
+			copy[key] = value
+		}
+		copy["recipient_id"] = recipientID
+		data, err := json.Marshal(copy)
+		if err != nil {
+			return err
+		}
+		h.queueTo(recipientID, data)
+	}
+	return nil
+}
+
 func (h *Hub) queueTo(recipientID string, data []byte) {
 	h.mu.RLock()
 	if h.stopping {

@@ -76,6 +76,7 @@ const peopleSearch = document.querySelector("#people-search");
 const groupUserSearch = document.querySelector("#group-user-search");
 const selectedMembers = document.querySelector("#selected-members");
 const callButton = document.querySelector("#call-button");
+const videoCallButton = document.querySelector("#video-call-button");
 const moreButton = document.querySelector("#more-button");
 const closeInfoButton = document.querySelector("#close-info-button");
 const groupManagement = document.querySelector("#group-management");
@@ -805,6 +806,7 @@ function mergeMessages(cache, messages) {
 function processE2EEMessages(cache, retryErrors = false) {
   const client = state.e2ee;
   for (const message of cache.messages.values()) {
+    if (message.kind !== "text") continue;
     if (message.recalled_at || cache.recalls.has(message.id)) {
       cache.decryptedViews.delete(message.id);
       continue;
@@ -1016,7 +1018,7 @@ function renderMessages(scrollMode = "preserve") {
 
       const content = document.createElement("p");
       const recalled = Boolean(message.recalled_at || cache.recalls.has(message.id));
-      const encrypted = !recalled && (message.content_format === "e2ee_v2" || cache.summary?.kind === "direct");
+      const encrypted = !recalled && message.kind === "text" && (message.content_format === "e2ee_v2" || cache.summary?.kind === "direct");
       const view = cache.decryptedViews.get(message.id);
       const cryptoState = !encrypted ? "plaintext" : cache.payloadConflict ? "error"
         : state.e2ee?.canRead() ? view?.status || "pending" : "pending";
@@ -1283,6 +1285,24 @@ function handleSocketMessage(data) {
     return;
   }
   if (!event || typeof event !== "object") return;
+  if (event.type?.startsWith("call.")) {
+    window.MiniHermesCalls?.handleEvent(event);
+    if (event.type === "call.ended") {
+      const cache = state.threads.get(event.thread_id);
+      if (cache?.messagesLoaded) void catchUpConversation(cache);
+      scheduleThreadSummaryRefresh();
+    }
+    return;
+  }
+  if (event.type?.startsWith("group-call.")) {
+    window.MiniHermesGroupCalls?.handleEvent(event);
+    if (event.type === "group-call.ended") {
+      const cache = state.threads.get(event.thread_id);
+      if (cache?.messagesLoaded) void catchUpConversation(cache);
+      scheduleThreadSummaryRefresh();
+    }
+    return;
+  }
   if (event.type === "message.recalled") {
     if (event.recipient_id === state.currentUserID) applyRecall(event);
     return;
@@ -1349,6 +1369,8 @@ async function connectWebSocket() {
         clearSocketHealthTimer();
       }
       showError("");
+      void window.MiniHermesCalls?.reconcile();
+      void window.MiniHermesGroupCalls?.reconcile();
       void syncRecallChanges();
       if (state.socketSummaryStale) {
         state.socketSummaryStale = false;
@@ -1646,6 +1668,7 @@ async function openThread(threadID) {
     await loadInitialHistory(cache);
   }
   if (state.currentCache === cache) {
+    void window.MiniHermesGroupCalls?.observeThread(cache.summary, state.currentUserID);
     void flushReadMarker();
     if (canUseThread(cache)) contentInput.focus();
   }
@@ -1868,7 +1891,8 @@ groupUserSearch.addEventListener("input", () => {
 });
 groupUsers.addEventListener("change", renderSelectedMembers);
 closeInfoButton.addEventListener("click", () => { membersPanel.hidden = true; });
-callButton.addEventListener("click", () => showNotice("Gọi điện đang được phát triển và chưa khả dụng trong phiên bản này."));
+callButton.addEventListener("click", () => window.MiniHermesGroupCalls?.start(state.currentCache?.summary, "audio", state.currentUserID));
+videoCallButton.addEventListener("click", () => window.MiniHermesGroupCalls?.start(state.currentCache?.summary, "video", state.currentUserID));
 moreButton.addEventListener("click", () => showNotice("Các thao tác bổ sung sẽ xuất hiện tại đây khi được hỗ trợ."));
 newMessagesButton.addEventListener("click", () => {
   historyElement.scrollTop = historyElement.scrollHeight;

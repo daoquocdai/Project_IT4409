@@ -442,6 +442,34 @@ select { min-width: 0; flex: 1; }
 #group-management { padding-top: 18px; } #group-management > h3 { margin: 0 0 10px; font-size: .83rem; } #member-list { padding: 0; list-style: none; } #member-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 7px 0; font-size: .72rem; } #member-list button { min-height: 32px; margin: 0; }
 .danger-button { width: 100%; margin-top: 18px; color: #b91c1c; background: #fee2e2; }
 
+.incoming-call, .call-panel { position: fixed; z-index: 40; color: #fff; background: rgba(15,23,42,.97); box-shadow: 0 24px 80px rgba(15,23,42,.35); }
+.incoming-call { top: 20px; left: 50%; width: min(380px, calc(100% - 28px)); padding: 28px; border-radius: 22px; text-align: center; transform: translateX(-50%); }
+.incoming-call[hidden], .call-panel[hidden] { display: none; }.incoming-call .eyebrow { color: #93c5fd; }.incoming-call h2 { margin: 6px 0; }.incoming-call > div:last-child { display: flex; justify-content: center; gap: 16px; margin-top: 22px; }
+.call-avatar { display: grid; width: 64px; height: 64px; place-items: center; margin: 0 auto 14px; border-radius: 50%; color: #1d4ed8; background: #dbeafe; font-size: 1.6rem; }
+.call-avatar svg { width: 28px; height: 28px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.call-panel { inset: 0; display: grid; overflow: hidden; place-items: center; background: #07111f; }
+.call-panel #remote-media { width: 100%; height: 100%; object-fit: cover; }.call-panel #local-video { position: absolute; top: 20px; right: 20px; width: min(24vw, 240px); aspect-ratio: 16/9; border: 1px solid #475569; border-radius: 14px; background: #0f172a; object-fit: cover; box-shadow: 0 8px 30px #0008; }
+.call-copy { position: absolute; top: 12%; text-align: center; text-shadow: 0 2px 12px #000; }.call-copy h2 { margin: 0; font-size: 1.55rem; }.call-copy p { margin: 8px 0; }.call-copy time { font-variant-numeric: tabular-nums; }
+.call-controls { position: absolute; right: 0; bottom: max(28px, env(safe-area-inset-bottom)); left: 0; display: flex; justify-content: center; gap: 12px; padding: 0 16px; }
+.call-control { min-width: 48px; min-height: 48px; margin: 0; border-radius: 999px; color: #fff; background: #334155; }.call-control.accept { background: #16a34a; }.call-control.danger { color: #fff; background: #dc2626; }.call-control[aria-pressed="true"] { background: #f8fafc; color: #0f172a; }
+@media (max-width: 640px) { .call-panel #local-video { top: 12px; right: 12px; width: 34vw; }.call-controls { gap: 8px; }.call-control { padding-inline: 14px; } }
+.group-call-card { display: flex; align-items: center; gap: 12px; margin: 12px 20px 0; padding: 12px 14px; border: 1px solid #bfdbfe; border-radius: 14px; background: #eff6ff; color: #0f172a; }
+.group-call-card[hidden], .group-call-panel[hidden] { display: none; }
+.group-call-card-icon { color: #16a34a; animation: group-call-pulse 1.8s ease-in-out infinite; }
+.group-call-card span:nth-child(2) { display: grid; flex: 1; gap: 2px; }.group-call-card small { color: #64748b; }.group-call-card button { min-height: 44px; }
+.group-call-panel { position: fixed; inset: 0; z-index: 45; display: grid; grid-template-rows: auto 1fr auto; gap: 16px; padding: 20px; color: #fff; background: #07111f; }
+.group-call-panel > header { display: flex; align-items: center; justify-content: space-between; }.group-call-panel h2, .group-call-panel p { margin: 0; }.group-call-panel p { margin-top: 4px; color: #cbd5e1; }
+.group-call-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.group-call-grid:has(.group-call-tile:only-child) { grid-template-columns: minmax(0, 720px); grid-template-rows: 1fr; justify-content: center; }
+.group-call-tile { position: relative; display: grid; min-height: 0; overflow: hidden; place-items: center; border: 1px solid #334155; border-radius: 18px; background: #111c2d; }
+.group-call-tile video { position: absolute; width: 100%; height: 100%; object-fit: cover; opacity: 0; }.group-call-tile.has-video video { opacity: 1; }.group-call-tile.has-video .group-call-avatar { opacity: 0; }
+.group-call-avatar { display: grid; width: 84px; height: 84px; place-items: center; border-radius: 50%; color: #1d4ed8; background: #dbeafe; font-size: 2rem; font-weight: 700; }
+.group-call-tile strong, .group-call-tile small { position: absolute; z-index: 1; left: 14px; padding: 4px 8px; border-radius: 8px; background: #07111fbb; }.group-call-tile strong { bottom: 36px; }.group-call-tile small { bottom: 10px; color: #cbd5e1; }
+.group-call-panel .call-controls { position: static; }.call-control.danger-outline { border: 1px solid #ef4444; color: #fecaca; background: transparent; }
+@keyframes group-call-pulse { 50% { opacity: .35; transform: scale(.85); } }
+@media (max-width: 640px) { .group-call-panel { padding: 12px; }.group-call-grid { gap: 8px; }.group-call-tile { border-radius: 12px; }.group-call-avatar { width: 58px; height: 58px; font-size: 1.4rem; }.group-call-panel .call-controls { flex-wrap: wrap; }.group-call-card { margin-inline: 12px; } }
+@media (prefers-reduced-motion: reduce) { .group-call-card-icon { animation: none; } }
+
 .compose-dialog { width: min(560px, calc(100% - 28px)); max-height: min(720px, calc(100vh - 32px)); padding: 0; overflow: hidden; border: 0; border-radius: 20px; color: #0f172a; background: white; box-shadow: 0 28px 80px rgba(15,23,42,.24); }.compose-dialog::backdrop { background: rgba(15,23,42,.48); backdrop-filter: blur(3px); }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; padding: 22px 24px 12px; }.dialog-heading h2 { margin: 0; font-size: 1.25rem; }.dialog-heading .eyebrow { margin: 0 0 4px; }.dialog-heading .icon-button { border: 0; font-size: 1.5rem; }
 .dialog-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 0 24px; padding: 4px; border-radius: 11px; background: #f1f5f9; }.dialog-tabs button { min-height: 40px; color: #64748b; background: transparent; font-size: .78rem; font-weight: 700; }.dialog-tabs button[aria-selected="true"] { color: #1d4ed8; background: white; box-shadow: 0 2px 8px rgba(15,23,42,.08); }
