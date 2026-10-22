@@ -7,6 +7,8 @@ import (
 
 	"github.com/daoquocdai/chat-api/config"
 	authmiddleware "github.com/daoquocdai/chat-api/internal/middleware"
+	attachmenthandler "github.com/daoquocdai/chat-api/internal/module/attachment/handler"
+	attachmentrepository "github.com/daoquocdai/chat-api/internal/module/attachment/repository"
 	e2eehandler "github.com/daoquocdai/chat-api/internal/module/e2ee/handler"
 	e2eerepository "github.com/daoquocdai/chat-api/internal/module/e2ee/repository"
 	e2eeservice "github.com/daoquocdai/chat-api/internal/module/e2ee/service"
@@ -85,14 +87,21 @@ func run() error {
 	e2eeHandler := e2eehandler.New(e2eeService)
 
 	messageRepository := messagerepository.New(pool)
+	messagePublisher := messagepublisher.NewRedis(redisClient, cfg.Redis.Stream)
 	messageService := messageservice.New(
 		messageRepository,
 		userService,
-		messagepublisher.NewRedis(redisClient, cfg.Redis.Stream),
+		messagePublisher,
 		membership.NewRedis(redisClient, cfg.Redis.Stream),
 		cfg.Redis.PublishTimeout,
 	)
 	messageHandler := messagehandler.New(messageService)
+	messageservice.StartRecallOutbox(ctx, messageRepository, messagePublisher, cfg.Redis.PublishTimeout)
+	attachmentHandler, err := attachmenthandler.New(attachmentrepository.New(pool), cfg.AttachmentDir)
+	if err != nil {
+		return fmt.Errorf("initialize attachment storage: %w", err)
+	}
+	attachmentHandler.StartCleanup(ctx)
 
 	threadRepository := threadrepository.New(pool)
 	threadService := threadservice.New(threadRepository, userService, messageService, threadpublisher.NewRedis(redisClient, cfg.Redis.Stream), cfg.Redis.PublishTimeout)
@@ -108,6 +117,7 @@ func run() error {
 		wsTicketHandler,
 		e2eeHandler,
 		authmiddleware.RequireAuthentication(jwtManager),
+		attachmentHandler,
 	)
 
 	log.Printf("starting HTTP server on %s", cfg.HTTPAddress)

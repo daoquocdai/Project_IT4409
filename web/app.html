@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đoạn chat | Mini Hermes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css?v=20261019-attachments">
+</head>
+<body class="messenger-page">
+  <main class="messenger" aria-label="Mini Hermes">
+    <aside class="conversation-sidebar">
+      <a class="sidebar-brand" href="/" aria-label="Mini Hermes — về trang chủ"><span class="brand-mark" aria-hidden="true">H</span><strong>Mini Hermes</strong></a>
+      <div class="sidebar-title-row">
+        <h1>Đoạn chat</h1>
+        <button id="new-conversation-button" class="icon-button primary-icon" type="button" aria-label="Soạn tin nhắn mới" title="Tin nhắn mới"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4Z"/></svg></button>
+      </div>
+      <label class="search-field" for="conversation-search"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg><input id="conversation-search" type="search" placeholder="Tìm người hoặc cuộc trò chuyện…" autocomplete="off"></label>
+      <div id="conversation-filters" class="conversation-filters" role="group" aria-label="Lọc cuộc trò chuyện">
+        <button type="button" class="active" data-filter="all" aria-pressed="true">Tất cả</button>
+        <button type="button" data-filter="unread" aria-pressed="false">Chưa đọc</button>
+        <button type="button" data-filter="group" aria-pressed="false">Nhóm</button>
+      </div>
+      <div id="direct-thread-list" class="conversation-list" aria-live="polite"></div>
+      <div id="group-thread-list" hidden></div>
+      <details class="account-menu">
+        <summary><span id="account-avatar" class="avatar avatar-own">M</span><span class="account-copy"><small>Đang đăng nhập</small><strong id="current-username"></strong></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></summary>
+        <div class="account-popover"><a href="/">Trang chủ</a><button id="logout-button" type="button" hidden>Đăng xuất</button></div>
+      </details>
+    </aside>
+
+    <section id="chat-view" class="chat-workspace" hidden>
+      <p id="notice" class="floating-message notice" role="status" hidden></p>
+      <p id="error" class="floating-message error" role="alert" hidden></p>
+      <section id="empty-conversation" class="conversation-empty">
+        <span class="empty-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4v8Z"/></svg></span>
+        <h2>Bắt đầu một cuộc trò chuyện</h2><p>Chọn một đoạn chat có sẵn hoặc gửi lời chào đến một người mới.</p><button id="empty-new-conversation" type="button">Tin nhắn mới</button>
+      </section>
+      <section id="active-conversation" class="active-conversation" hidden>
+        <header class="conversation-header">
+          <div class="conversation-identity"><button id="back-to-list-button" class="icon-button back-to-list" type="button" aria-label="Quay lại danh sách">←</button><span id="conversation-avatar" class="avatar avatar-large">H</span><span><h2 id="peer-name">Cuộc trò chuyện</h2><p id="thread-status"></p></span></div>
+          <div class="conversation-actions">
+            <button id="call-button" class="icon-button" type="button" aria-label="Gọi điện" title="Gọi điện — đang phát triển"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.68 2.8a2 2 0 0 1-.45 2.11L8.07 9.9a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.9.32 1.84.55 2.8.68A2 2 0 0 1 22 16.92Z"/></svg></button>
+            <button id="members-button" class="icon-button" type="button" aria-label="Thông tin cuộc trò chuyện" title="Thông tin"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></svg></button>
+            <button id="more-button" class="icon-button" type="button" aria-label="Thao tác khác" title="Thao tác khác"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
+          </div>
+        </header>
+        <section id="e2ee-panel" class="e2ee-panel" aria-label="Tình trạng gửi tin" hidden><p id="e2ee-status" role="status" data-status="initializing">Đang chuẩn bị chat...</p><div id="e2ee-pending" hidden><p id="e2ee-pending-info" class="key-hint"></p><div id="e2ee-pending-list" class="e2ee-actions"></div></div></section>
+        <div class="history-actions"><button id="load-older-button" class="secondary" type="button" hidden>Tin cũ hơn</button></div>
+        <div id="history" class="history" aria-live="polite" aria-label="Lịch sử tin nhắn"></div>
+        <button id="new-messages-button" class="new-messages-button" type="button" hidden>Tin nhắn mới ↓</button>
+        <button id="e2ee-decrypt-retry" class="secondary decrypt-retry" type="button" hidden>Thử giải mã lại</button>
+        <form id="message-form" class="message-composer"><div id="attachment-draft" class="attachment-draft" hidden><span><strong id="attachment-name"></strong><small id="attachment-size"></small></span><button id="remove-attachment" type="button" aria-label="Bỏ tệp đã chọn">×</button></div><button id="attachment-button" class="composer-tool" type="button" aria-label="Đính kèm tệp" title="Đính kèm tệp (tối đa 20 MiB)" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></svg></button><input id="attachment-input" class="sr-only" type="file" tabindex="-1"><div id="emoji-wrapper" class="emoji-wrapper"><button id="emoji-toggle" class="emoji-toggle" type="button" aria-label="Chọn biểu tượng cảm xúc" aria-expanded="false" aria-controls="emoji-picker" title="Biểu tượng cảm xúc" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9h.01M15 9h.01"/></svg></button><div id="emoji-picker" class="emoji-picker" role="group" aria-label="Biểu tượng cảm xúc" hidden></div></div><label class="sr-only" for="content">Nhập tin nhắn</label><textarea id="content" name="content" rows="1" placeholder="Nhập tin nhắn…" autocomplete="off" disabled></textarea><button id="send-button" class="send-button" type="submit" disabled aria-label="Gửi tin nhắn" title="Gửi"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button></form>
+      </section>
+    </section>
+
+    <aside id="members-panel" class="info-drawer" hidden aria-label="Thông tin cuộc trò chuyện">
+      <div class="drawer-heading"><h2>Thông tin</h2><button id="close-info-button" class="icon-button" type="button" aria-label="Đóng bảng thông tin">×</button></div>
+      <div class="drawer-profile"><span id="info-avatar" class="avatar avatar-xlarge">H</span><h3 id="info-title">Cuộc trò chuyện</h3><p id="info-description"></p></div>
+      <section id="group-management"><h3>Thành viên</h3><ul id="member-list"></ul><form id="add-member-form" hidden><label for="add-member-user">Thêm thành viên</label><div class="row"><select id="add-member-user" name="user_id"></select><button id="add-member-button" type="submit">Thêm</button></div></form><button id="leave-button" class="danger-button" type="button">Rời nhóm</button></section>
+    </aside>
+  </main>
+
+  <dialog id="new-conversation-dialog" class="compose-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">Bắt đầu kết nối</p><h2>Cuộc trò chuyện mới</h2></div><button id="close-compose-dialog" class="icon-button" type="button" aria-label="Đóng">×</button></div>
+    <div class="dialog-tabs" role="tablist" aria-label="Loại cuộc trò chuyện"><button id="direct-tab" type="button" role="tab" aria-selected="true">Tin nhắn mới</button><button id="group-tab" type="button" role="tab" aria-selected="false">Tạo nhóm</button></div>
+    <section id="direct-compose-panel" role="tabpanel" aria-labelledby="direct-tab"><label for="people-search">Tìm một người</label><input id="people-search" type="search" placeholder="Nhập tên tài khoản…" autocomplete="off"><div id="new-direct-section"><div id="peer-list" class="people-list"></div></div></section>
+    <form id="group-form" hidden role="tabpanel" aria-labelledby="group-tab"><label for="group-name">Tên nhóm</label><input id="group-name" name="name" maxlength="100" placeholder="Ví dụ: Nhóm IT4409" required><label for="group-user-search">Chọn thành viên</label><input id="group-user-search" type="search" placeholder="Tìm thành viên…" autocomplete="off"><div id="selected-members" class="selected-members" aria-live="polite"></div><div id="group-users" class="group-users"></div><button id="create-group-button" type="submit">Tạo nhóm</button><button id="recover-group-button" class="secondary" type="button" hidden>Mở lại nhóm đã tạo</button></form>
+  </dialog>
+
+  <section id="auth-view" hidden aria-hidden="true"><form id="register-form"><input id="register-username" name="username"><input id="register-password" name="password" type="password"><button id="register-button" type="submit"></button></form><form id="login-form"><input id="login-username" name="username"><input id="login-password" name="password" type="password"><button id="login-button" type="submit"></button></form></section>
+  <button id="refresh-users-button" type="button" hidden>Thử lại</button>
+  <script src="/wasm_exec.js?v=20261009-v2" defer></script><script src="/e2ee-wasm.js?v=20261009-v2" defer></script><script src="/e2ee-state.js?v=20261009-v2" defer></script><script src="/e2ee.js?v=20261019-attachments" defer></script><script src="/realtime-core.js?v=20261009-v2" defer></script><script src="/app.js?v=20261019-attachments" defer></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+.git
+.gitignore
+.pytest_cache
+config/config.yml
+web/e2ee.wasm
+web/wasm_exec.js
+README.md
+docs

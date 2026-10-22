@@ -4,7 +4,57 @@ Mini-Hermes gồm hai tiến trình Go: HTTP API xử lý nghiệp vụ và lưu
 
 Mỗi direct khởi tạo X3DH một lần, dùng phiên khóa cố định và dẫn xuất khóa riêng cho từng tin. Đúng username/mật khẩu cho phép khôi phục khóa và lịch sử trên tab, thiết bị hoặc phiên ẩn danh mới; nhiều thiết bị có thể hoạt động đồng thời. Quyết định và giới hạn nằm trong [ADR 005](docs/adr/005-recoverable-e2ee-sessions.md).
 
-## Chạy local
+## Chạy toàn bộ bằng Docker
+
+Đây là cách đơn giản nhất và chỉ yêu cầu Docker Desktop có Docker Compose v2. Không cần cài Go, Goose, GNU Make, Node.js, PostgreSQL hay Redis trên máy. Lần chạy đầu tiên vẫn cần Internet để Docker tải image và Go module trong quá trình build.
+
+Tại thư mục dự án, chạy:
+
+```powershell
+Set-Location 'D:\DATA\Visual\Project_IT4409'
+docker compose up --build -d
+```
+
+Compose sẽ tự build API, WebSocket gateway và E2EE WebAssembly; chờ PostgreSQL/Redis sẵn sàng; chạy migration; sau đó khởi động ứng dụng. Ciphertext của tệp đính kèm được giữ trong volume `attachment_data`, vì vậy vẫn còn khi container API được tạo lại.
+
+Kiểm tra trạng thái, log và API:
+
+```powershell
+docker compose ps
+docker compose logs -f api gateway migrate
+Invoke-RestMethod http://localhost:8080/health
+```
+
+Khi health endpoint trả `{"status":"ok"}`, mở `http://localhost:8080`.
+
+Compose có JWT secret mặc định chỉ dành cho local. Khi cần đặt secret riêng, dùng cùng một giá trị cho API và gateway thông qua biến sau:
+
+```powershell
+$env:MINI_HERMES_JWT_SECRET = 'thay-bang-secret-ngau-nhien-dai-cua-ban'
+docker compose up --build -d
+```
+
+Khởi động lại không cần build:
+
+```powershell
+docker compose up -d
+```
+
+Dừng và giữ dữ liệu PostgreSQL:
+
+```powershell
+docker compose down
+```
+
+Chỉ khi muốn xóa toàn bộ dữ liệu local:
+
+```powershell
+docker compose down -v
+```
+
+Lệnh `down -v` xóa cả PostgreSQL và tệp đính kèm. Hãy sao lưu hai volume trước khi dùng trong môi trường có dữ liệu cần giữ.
+
+## Chạy local bằng công cụ trên máy
 
 Cần Go theo [go.mod](go.mod), Docker Compose, GNU Make và `goose` trên PATH. Node.js có `fetch` và WebSocket dùng cho kiểm thử client. `sqlc` chỉ cần khi sinh lại mã truy vấn. Browser cần secure context, WebAssembly và `crypto.randomUUID`; `localhost` đáp ứng secure context.
 
@@ -79,22 +129,14 @@ Các endpoint nghiệp vụ yêu cầu `Authorization: Bearer <access_token>`; `
 | `POST` | `/threads/:id/epochs` | Khởi tạo phiên cố định: `epoch_id`, `bootstrap`, `key_backup` |
 | `PUT` | `/threads/:id/epochs/:epoch_id/key` | Lưu backup; trả bản đã commit |
 | `GET` | `/threads/:id/messages` | Lịch sử với `before_seq`, `limit` |
-| `POST` | `/threads/:id/messages` | `message_id`, `content_format`, `content` |
+| `POST` | `/threads/:id/messages` | `message_id`, `content_format`, `content`, tùy chọn `attachment_ids` |
+| `POST` | `/threads/:id/attachments` | Upload một ciphertext multipart trường `file`, tối đa 20 MiB + tag GCM |
+| `GET` | `/attachments/:id/content` | Tải ciphertext sau khi kiểm tra quyền xem tin nhắn |
 | `PUT` | `/threads/:id/read` | Tăng `last_read_seq` |
 
 Gateway nhận `GET /ws?ticket=...`; client ngoài browser cũng có thể dùng Bearer JWT trong header. Claim/epoch APIs chỉ áp dụng cho direct. Payload mật mã được giải thích tại [luồng E2EE](docs/project-flows.md#e2ee-phiên-cố-định-và-khôi-phục).
 
-## Trạng thái online/offline
-
-User **trực tuyến** khi còn ít nhất một socket đã xác thực, upgrade và đăng ký thành công vào Hub; đăng nhập HTTP thành công chưa đủ. User **ngoại tuyến** khi gateway xác định không còn socket nào của tài khoản đó. Mở nhiều tab/thiết bị vẫn tính chung một user: chỉ socket đầu tiên phát online, chỉ khi mất socket cuối cùng mới phát offline. Chuyển tab, thu nhỏ cửa sổ hoặc không thao tác không làm user offline.
-
-Mỗi socket mới nhận `presence.snapshot` đầu tiên trong các frame presence, gồm toàn bộ `online_user_ids` và chính user vừa kết nối. Sau đó, `presence.changed` mang `user_id`, boolean `online` và `revision` tăng theo mỗi lần user đổi trạng thái. Revision thuộc riêng presence, không dùng `message.seq`. Tab thứ hai vẫn nhận snapshot nhưng không tạo delta online thừa.
-
-Client chỉ hiển thị trực tuyến/ngoại tuyến sau snapshot hợp lệ; tài khoản đã biết không có trong snapshot được coi là ngoại tuyến. Trước snapshot hoặc khi mất kết nối/reconnect, nhãn chuyển thành **Chưa xác định**. Snapshot mới thay toàn bộ cache trong RAM của tab; khi thiếu revision, client dùng reconnect/backoff hiện có để lấy lại snapshot. Các nhãn xuất hiện ở direct trong sidebar, danh sách mở chat, header direct và thành viên nhóm; cập nhật presence giữ nguyên draft và lựa chọn thành viên.
-
-Gateway gửi WebSocket control Ping mỗi 10 giây, chờ Pong tối đa 5 giây và giữ heartbeat JSON mỗi 5 giây. Mất mạng im lặng thường được phát hiện trong khoảng 15 giây; đây không phải giới hạn tuyệt đối dưới mọi tải và điều kiện mạng. Heartbeat không đo hoạt động của người dùng.
-
-Presence chỉ nằm trong RAM của **một gateway**, phát trực tiếp từ Hub cho các socket đã xác thực; không có REST endpoint, Redis key/Stream hay cột database cho presence. Gateway restart làm mất trạng thái và reset revision; mỗi socket reconnect lấy snapshot mới. Bản này không có last-seen, idle hoặc ẩn trạng thái. Payload và thứ tự xử lý: [luồng presence](docs/project-flows.md#presence-onlineoffline).
+Tệp direct được mã hóa AES-256-GCM ngay trong browser bằng khóa/IV mới cho từng tệp. Server chỉ nhận ciphertext; tên, MIME, khóa và IV nằm trong nội dung tin nhắn E2EE. Bản hiện tại chưa cho gửi tệp trong nhóm vì nhóm vẫn dùng plaintext. Tệp upload nhưng chưa gắn vào tin nhắn được đánh dấu `pending` và dọn sau 24 giờ.
 
 ## Sơ đồ sequence tóm tắt
 

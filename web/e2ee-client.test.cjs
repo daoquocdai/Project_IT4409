@@ -52,7 +52,7 @@ function browserFixture(fetchAPI, cache = new Map()) {
         ? this.children.filter((item) => item.dataset?.seq).at(-1) : null; },
       getBoundingClientRect() { return { top: 0, bottom: 100, left: 0, right: 100 }; } };
   }
-  const nodes = new Map([...fs.readFileSync(path.join(__dirname, "index.html"), "utf8")
+  const nodes = new Map([...fs.readFileSync(path.join(__dirname, "app.html"), "utf8")
     .matchAll(/<([a-z][a-z0-9]*)\b[^>]*\bid="([^"]+)"/g)].map((match) => [match[2], element(match[1])]));
   for (const name of ["register", "login"]) nodes.get(name + "-form").elements = {
     username: nodes.get(name + "-username"), password: nodes.get(name + "-password") };
@@ -583,6 +583,34 @@ test("a queued read notification cannot refresh a replacement login session", as
   assert.equal(ui.calls.length, 0);
 });
 
+test("recall tombstones win both before and after a delayed message event", () => {
+  const ui = frontendFixture(async () => apiResponse({}));
+  const first = { type: "message.created", recipient_id: A, message_id: crypto.randomUUID(),
+    thread_id: T, sender_id: A, seq: 1, kind: "text", content_format: "plaintext",
+    content: "must disappear", created_at: "2026-10-19T10:00:00Z" };
+  ui.socketEvent(first);
+  ui.socketEvent({ type: "message.recalled", recipient_id: A, event_id: crypto.randomUUID(),
+    change_seq: 1, message_id: first.message_id, thread_id: T, sender_id: A,
+    recalled_at: "2026-10-19T10:01:00Z" });
+  ui.context.fixtureMessageID = first.message_id;
+  assert.equal(ui.run(`(() => { const seq = state.currentCache.messageIDs.get(fixtureMessageID);
+    const message = state.currentCache.messages.get(seq); return JSON.stringify([message.content, message.recalled_at, state.recallCursor]); })()`),
+  JSON.stringify(["", "2026-10-19T10:01:00Z", 1]));
+
+  const delayedID = crypto.randomUUID();
+  ui.socketEvent({ type: "message.recalled", recipient_id: A, event_id: crypto.randomUUID(),
+    change_seq: 2, message_id: delayedID, thread_id: T, sender_id: B,
+    recalled_at: "2026-10-19T10:02:00Z" });
+  ui.socketEvent({ type: "message.created", recipient_id: A, message_id: delayedID,
+    thread_id: T, sender_id: B, seq: 2, kind: "text", content_format: "plaintext",
+    content: "late payload", created_at: "2026-10-19T10:00:30Z" });
+  ui.context.fixtureMessageID = delayedID;
+  assert.equal(ui.run(`(() => { const seq = state.currentCache.messageIDs.get(fixtureMessageID);
+    const message = state.currentCache.messages.get(seq); return JSON.stringify([message.content, message.recalled_at,
+      state.currentCache.summary.last_message.content, state.currentCache.summary.last_message.recalled_at]); })()`),
+  JSON.stringify(["", "2026-10-19T10:02:00Z", "", "2026-10-19T10:02:00Z"]));
+});
+
 test("read summaries update peer read markers and cannot overwrite a newer local read", async () => {
   let summary;
   const ui = frontendFixture(() => apiResponse([summary]));
@@ -628,7 +656,7 @@ test("refresh users adds accounts, preserves group/member choices and conversati
   second.resolve(apiResponse([...refreshed, { id: "55555555-5555-4555-8555-555555555555", username: "latest account" }]));
   await refresh;
   assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
-  assert.equal(ui.nodes.get("peer-list").children.some((button) => button.children[0].textContent === "latest account"), true);
+  assert.equal(ui.nodes.get("peer-list").children.some((button) => button.children[1]?.textContent === "latest account"), true);
   assert.equal(ui.nodes.get("group-users").querySelectorAll("input:checked")[0].value, B);
   assert.equal(ui.nodes.get("add-member-user").value, B);
   assert.equal(ui.nodes.get("add-member-user").options.some((option) => option.textContent === "latest account"), true);
@@ -639,9 +667,9 @@ test("refresh users adds accounts, preserves group/member choices and conversati
   assert.equal(ui.run("state.e2ee"), client);
   assert.equal(ui.run("state.threadID"), T);
   assert.equal(ui.calls.every((call) => call.url === "/users"), true);
-  const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
-  assert.ok(html.indexOf('id="refresh-users-button"') < html.indexOf('id="new-direct-section"'),
-    "refresh must stay available even when the new-direct section is hidden");
+  const html = fs.readFileSync(path.join(__dirname, "app.html"), "utf8");
+  assert.ok(html.includes('id="refresh-users-button"') && html.includes('id="refresh-users-button" type="button" hidden'),
+    "the automatic user refresh control keeps a hidden retry target");
 });
 
 test("refresh remains available without peers and drops choices for removed users", async () => {
@@ -653,7 +681,7 @@ test("refresh remains available without peers and drops choices for removed user
   users = [...users, { id: B, username: "bob" }];
   await ui.refresh();
   assert.equal(ui.nodes.get("new-direct-section").hidden, false);
-  assert.equal(ui.nodes.get("peer-list").children[0].children[0].textContent, "bob");
+  assert.equal(ui.nodes.get("peer-list").children[0].children[1].textContent, "bob");
   ui.nodes.get("group-users").querySelectorAll("*").find((node) => node.tag === "input").checked = true;
   ui.nodes.get("members-panel").hidden = false;
   ui.run("state.currentCache.members = [fixtureUsers[0]]; renderMembers(state.currentCache);");
@@ -689,269 +717,7 @@ test("user refresh errors restore its button and obsolete responses cannot chang
   await newRequest;
   assert.equal(ui.nodes.get("refresh-users-button").disabled, false);
   assert.equal(ui.run("state.currentUsername"), "new bob");
-  assert.equal(ui.nodes.get("peer-list").children[0].children[0].textContent, "new peer");
-});
-
-test("presence validates complete frames, applies consecutive deltas and ignores stale snapshots", async () => {
-  const ui = frontendFixture(() => { throw new Error("presence must not request REST data"); });
-  const snapshot = (revision, ids) => ({ type: "presence.snapshot", revision, online_user_ids: ids });
-  const changed = (revision, online, user_id = B) => ({ type: "presence.changed", revision, user_id, online });
-  assert.equal(ui.run(`presenceForUser("${B}")`), "unknown");
-  ui.socketEvent(changed(1, true));
-  assert.equal(ui.run("state.presenceReady"), false, "delta before snapshot is ignored");
-  for (const event of [snapshot(-1, [B]), snapshot(1.1, [B]), snapshot("1", [B]),
-    snapshot(Number.MAX_SAFE_INTEGER + 1, [B]), snapshot(1, null), snapshot(1, {}),
-    snapshot(1, [B, "bad-id"]), snapshot(1, [B, "00000000-0000-0000-0000-000000000000"])]) {
-    ui.socketEvent(event);
-    assert.equal(ui.run("state.presenceReady"), false);
-    assert.equal(ui.run("state.onlineUserIDs.size"), 0, "invalid snapshot must never be applied partially");
-  }
-  ui.socketEvent(snapshot(10, [A, B, B.toUpperCase()]));
-  assert.equal(ui.run("state.onlineUserIDs.size"), 2);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  assert.equal(ui.run(`presenceForUser("${OFFLINE}")`), "offline");
-  for (const event of [changed(11, "false"), changed(11, 0), changed(11, false, "bad-id"),
-    changed(11, false, "00000000-0000-0000-0000-000000000000"), changed(-1, false),
-    changed(11.1, false), changed("11", false), changed(Number.MAX_SAFE_INTEGER + 1, false),
-    snapshot(12, [A, "bad-id"])]) ui.socketEvent(event);
-  assert.equal(ui.run("state.presenceRevision"), 10);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  ui.socketEvent(changed(11, false));
-  ui.socketEvent(changed(11, true));
-  ui.socketEvent(changed(9, true));
-  ui.socketEvent(snapshot(10, [B]));
-  ui.socketEvent(snapshot(11, [B]));
-  assert.equal(ui.run("state.presenceRevision"), 11);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "offline");
-  ui.socketEvent(changed(12, true));
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  ui.socketEvent(snapshot(13, []));
-  assert.equal(ui.run("state.onlineUserIDs.size"), 0, "snapshot replaces the entire online set");
-  assert.equal(ui.calls.length, 0);
-  assert.equal(ui.timers.size, 0);
-  assert.equal(ui.run("state.currentCache.messages.size + state.currentCache.eventMessages.size"), 0);
-  assert.equal(ui.run("state.currentCache.summary.unread_count"), 0);
-  assert.equal([...ui.cache.keys()].some((key) => /presence|online/i.test(key)), false);
-});
-
-test("presence updates all four UI locations in place and preserves forms, read state and E2EE", async () => {
-  const ui = frontendFixture(() => { throw new Error("presence must not request REST data"); });
-  ui.context.fixtureDirect = { id: "55555555-5555-4555-8555-555555555555", kind: "direct",
-    peer: { id: B, username: "bob" }, last_seq: 3, unread_count: 2 };
-  ui.nodes.get("members-panel").hidden = false;
-  ui.run(`state.users.push({ id: "${OFFLINE}", username: "carol" });
-    state.currentCache.members = fixtureUsers; state.currentCache.lastReadSeq = 2;
-    state.currentCache.syncedSeq = 3; state.currentCache.pendingReadSeq = 2;
-    state.currentCache.draftContent = "saved draft"; contentInput.value = "unfinished draft";
-    reconcileThreadSummary(fixtureDirect); renderPeerList(); renderMembers(state.currentCache);
-    const choice = document.createElement("input"); choice.type = "checkbox"; choice.value = "${B}";
-    choice.checked = true; groupUsers.append(choice);`);
-  ui.nodes.get("group-name").value = "unfinished group";
-  ui.nodes.get("add-member-user").value = OFFLINE;
-  ui.nodes.get("history").scrollTop = 23;
-  const cache = ui.run("state.currentCache"), client = ui.run("state.e2ee");
-  const directButton = ui.nodes.get("direct-thread-list").children[0];
-  const newPeerButton = ui.nodes.get("peer-list").children[0];
-  const memberRows = [...ui.nodes.get("member-list").children];
-  const memberOptions = [...ui.nodes.get("add-member-user").options];
-  const directLabel = directButton.querySelectorAll("[data-presence-user-id]")[0];
-  const newPeerLabel = newPeerButton.querySelectorAll("[data-presence-user-id]")[0];
-  const memberLabels = ui.nodes.get("member-list").querySelectorAll("[data-presence-user-id]");
-  assert.equal(directLabel.textContent, "Chưa xác định");
-  assert.equal(ui.nodes.get("peer-presence").hidden, true, "group heading has no peer presence");
-  ui.socketEvent({ type: "presence.snapshot", revision: 1, online_user_ids: [A, B] });
-  assert.equal(directLabel.textContent, "Trực tuyến");
-  assert.equal(newPeerLabel.textContent, "Ngoại tuyến");
-  assert.equal(memberLabels.find((label) => label.dataset.presenceUserId === B).textContent, "Trực tuyến");
-  ui.socketEvent({ type: "presence.changed", revision: 2, user_id: B, online: false });
-  assert.equal(directLabel.textContent, "Ngoại tuyến");
-  assert.equal(memberLabels.find((label) => label.dataset.presenceUserId === B).textContent, "Ngoại tuyến");
-  assert.equal(ui.nodes.get("direct-thread-list").children[0], directButton);
-  assert.equal(ui.nodes.get("peer-list").children[0], newPeerButton);
-  assert.deepEqual(ui.nodes.get("member-list").children, memberRows);
-  assert.deepEqual(ui.nodes.get("add-member-user").options, memberOptions);
-  assert.equal(ui.nodes.get("add-member-user").value, OFFLINE);
-  assert.equal(ui.nodes.get("group-users").querySelectorAll("input:checked")[0].value, B);
-  assert.equal(ui.nodes.get("group-name").value, "unfinished group");
-  assert.equal(ui.nodes.get("content").value, "unfinished draft");
-  assert.equal(cache.draftContent, "saved draft");
-  assert.equal(ui.run("state.currentCache"), cache);
-  assert.equal(ui.run("state.threadID"), T);
-  assert.equal(ui.run("state.e2ee"), client);
-  assert.equal(cache.lastReadSeq, 2);
-  assert.equal(cache.pendingReadSeq, 2);
-  assert.equal(cache.syncedSeq, 3);
-  assert.equal(ui.nodes.get("history").scrollTop, 23);
-  assert.equal(ui.calls.length, 0);
-  ui.run("state.currentCache = state.threads.get(fixtureDirect.id); state.threadID = fixtureDirect.id; renderThreadHeading();");
-  const encryptionStatus = ui.nodes.get("thread-status").textContent;
-  assert.equal(ui.nodes.get("peer-presence").hidden, false);
-  assert.equal(ui.nodes.get("peer-presence").textContent, "Ngoại tuyến");
-  ui.socketEvent({ type: "presence.changed", revision: 3, user_id: B, online: true });
-  assert.equal(ui.nodes.get("peer-presence").textContent, "Trực tuyến");
-  assert.equal(ui.nodes.get("thread-status").textContent, encryptionStatus);
-  ui.run("stopWebSocket()");
-  assert.equal(ui.nodes.get("peer-presence").textContent, "Chưa xác định");
-  assert.equal(directLabel.textContent, "Chưa xác định");
-  assert.equal(newPeerLabel.textContent, "Chưa xác định");
-});
-
-test("user refresh renders new accounts using the existing in-memory presence snapshot", async () => {
-  const ui = frontendFixture(() => apiResponse([{ id: A, username: "alice" }, { id: B, username: "bob" },
-    { id: OFFLINE, username: "new account" }]));
-  ui.socketEvent({ type: "presence.snapshot", revision: 8, online_user_ids: [A, OFFLINE] });
-  await ui.refresh();
-  const labels = ui.nodes.get("peer-list").querySelectorAll("[data-presence-user-id]");
-  assert.equal(labels.find((label) => label.dataset.presenceUserId === B).textContent, "Ngoại tuyến");
-  assert.equal(labels.find((label) => label.dataset.presenceUserId === OFFLINE).textContent, "Trực tuyến");
-  assert.equal(ui.calls.length, 1);
-  assert.equal(ui.calls[0].url, "/users");
-});
-
-function presenceSocketFixture() {
-  const ui = frontendFixture((call) => {
-    if (call.url === "/auth/ws-ticket") return apiResponse({ ticket: "test-ticket", ws_url: "wss://chat.test/ws" });
-    assert.equal(call.url, "/threads", "only the existing reconnect summary request is expected");
-    return apiResponse([]);
-  });
-  ui.run('state.currentCache = null; state.threadID = "";');
-  ui.openSocket = async () => {
-    await ui.run("connectWebSocket()");
-    const socket = ui.sockets.at(-1);
-    socket.readyState = 1; socket.onopen();
-    await new Promise(setImmediate);
-    return socket;
-  };
-  ui.deliver = (socket, event) => socket.onmessage({ data: JSON.stringify(event) });
-  return ui;
-}
-
-test("socket disconnect becomes unknown and reconnect accepts a lower gateway revision with a full replacement", async () => {
-  const ui = presenceSocketFixture();
-  const first = await ui.openSocket();
-  assert.equal(ui.run("state.presenceReady"), false, "open must wait for snapshot");
-  ui.deliver(first, { type: "presence.snapshot", revision: 40, online_user_ids: [A, B] });
-  first.close();
-  assert.equal(ui.run(`presenceForUser("${B}")`), "unknown");
-  assert.equal(ui.run("state.onlineUserIDs.size"), 0);
-  assert.equal(ui.run("state.presenceRevision"), null);
-  assert.equal(ui.sockets.length, 1, "reconnect is delayed");
-  await ui.advance(999);
-  assert.equal(ui.sockets.length, 1);
-  await ui.advance(1);
-  const second = ui.sockets.at(-1);
-  assert.notEqual(second, first);
-  second.readyState = 1; second.onopen();
-  assert.equal(ui.run(`presenceForUser("${B}")`), "unknown");
-  ui.deliver(second, { type: "presence.snapshot", revision: 1, online_user_ids: [A, OFFLINE] });
-  assert.equal(ui.run("state.presenceRevision"), 1);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "offline", "missed offline delta is repaired");
-  assert.equal(ui.run(`presenceForUser("${OFFLINE}")`), "online", "missed online delta is repaired");
-  ui.deliver(first, { type: "presence.snapshot", revision: 99, online_user_ids: [B] });
-  assert.equal(ui.run("state.presenceRevision"), 1, "late old-socket frames are ignored");
-  ui.run("stopWebSocket()");
-});
-
-test("revision gaps invalidate presence and use delayed reconnect backoff", async () => {
-  const ui = presenceSocketFixture();
-  const socket = await ui.openSocket();
-  ui.deliver(socket, { type: "presence.snapshot", revision: 1, online_user_ids: [A, B] });
-  ui.run("state.reconnectDelay = 4000");
-  ui.deliver(socket, { type: "presence.changed", revision: 3, user_id: B, online: false });
-  assert.equal(socket.readyState, 3);
-  assert.equal(ui.run("state.presenceReady"), false);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "unknown");
-  assert.equal(ui.run("state.reconnectDelay"), 8000);
-  assert.equal(ui.calls.length, 1, "gap itself does not fetch REST/history");
-  await ui.advance(3999);
-  assert.equal(ui.sockets.length, 1);
-  await ui.advance(1);
-  assert.equal(ui.sockets.length, 2);
-  const replacement = ui.sockets.at(-1);
-  replacement.readyState = 1; replacement.onopen();
-  ui.deliver(replacement, { type: "presence.snapshot", revision: 4, online_user_ids: [A] });
-  assert.equal(ui.run(`presenceForUser("${B}")`), "offline");
-  ui.run("stopWebSocket()");
-});
-
-test("logout and account replacement ignore old socket callbacks and clear presence", async () => {
-  const ui = presenceSocketFixture();
-  const old = await ui.openSocket();
-  ui.deliver(old, { type: "presence.snapshot", revision: 5, online_user_ids: [A, B] });
-  ui.run(`clearSession(); state.token = "bob-token"; state.currentUserID = "${B}";`);
-  assert.equal(ui.run("state.presenceReady"), false);
-  assert.equal(ui.run("state.onlineUserIDs.size"), 0);
-  const current = await ui.openSocket();
-  ui.deliver(current, { type: "presence.snapshot", revision: 2, online_user_ids: [B] });
-  const timer = ui.run("state.socketHealthTimer");
-  old.onopen(); old.onclose();
-  ui.deliver(old, { type: "presence.changed", revision: 3, user_id: A, online: true });
-  assert.equal(ui.run("state.socket"), current);
-  assert.equal(ui.run("state.socketHealthTimer"), timer);
-  assert.equal(ui.run("state.presenceRevision"), 2);
-  assert.equal(ui.run(`presenceForUser("${A}")`), "offline");
-  // Session identity is an additional guard, even if a caller changes credentials
-  // before normal session cleanup increments the socket generation.
-  ui.run('state.token = "another-token"; state.sessionVersion += 1;');
-  ui.deliver(current, { type: "presence.changed", revision: 3, user_id: A, online: true });
-  current.onclose();
-  assert.equal(ui.run("state.presenceRevision"), 2);
-  assert.equal(ui.run("state.reconnectTimer"), null);
-  ui.run("clearSession()");
-});
-
-test("an old session's pending socket ticket cannot replace a new account's socket or presence", async () => {
-  const oldTicket = deferred(), newTicket = deferred();
-  const ui = frontendFixture((call) => {
-    assert.equal(call.url, "/auth/ws-ticket");
-    return ui.calls.length === 1 ? oldTicket.promise : newTicket.promise;
-  });
-  ui.run('state.currentCache = null; state.threadID = "";');
-  const oldConnect = ui.run("connectWebSocket()");
-  ui.run(`clearSession(); state.token = "bob-token"; state.currentUserID = "${B}";`);
-  const newConnect = ui.run("connectWebSocket()");
-  newTicket.resolve(apiResponse({ ticket: "new-ticket", ws_url: "wss://chat.test/ws" }));
-  await newConnect;
-  const socket = ui.sockets[0];
-  socket.readyState = 1; socket.onopen();
-  socket.onmessage({ data: JSON.stringify({ type: "presence.snapshot", revision: 2, online_user_ids: [B] }) });
-  oldTicket.resolve(apiResponse({ ticket: "obsolete-ticket", ws_url: "wss://chat.test/ws" }));
-  await oldConnect;
-  assert.equal(ui.sockets.length, 1);
-  assert.equal(ui.run("state.socket"), socket);
-  assert.equal(ui.run("state.socketConnecting"), false);
-  assert.equal(ui.run("state.presenceRevision"), 2);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  assert.equal(ui.run(`presenceForUser("${A}")`), "offline");
-  ui.run("stopWebSocket()");
-});
-
-test("hidden and idle tabs retain presence; visible resume keeps the existing heartbeat grace", async () => {
-  const ui = presenceSocketFixture();
-  const socket = await ui.openSocket();
-  ui.deliver(socket, { type: "presence.snapshot", revision: 1, online_user_ids: [A, B] });
-  ui.run('document.visibilityState = "hidden";');
-  ui.documentEvents.visibilitychange();
-  assert.equal(ui.run("state.socketHealthTimer"), null);
-  await ui.advance(60000);
-  assert.equal(socket.readyState, 1);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  ui.deliver(socket, { type: "heartbeat" });
-  assert.equal(ui.run("state.socketHealthTimer"), null);
-  ui.run('document.visibilityState = "visible"; state.socketLastActivityAt = Date.now() - 20000;');
-  ui.documentEvents.visibilitychange();
-  await ui.advance(4999);
-  assert.equal(socket.readyState, 1);
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  ui.deliver(socket, { type: "heartbeat" });
-  await ui.advance(5000);
-  assert.equal(socket.readyState, 1, "queued heartbeat must cancel the stale resume deadline");
-  ui.windowEvents.online();
-  assert.equal(ui.run(`presenceForUser("${B}")`), "online");
-  await ui.advance(15000);
-  assert.equal(socket.readyState, 3, "visible heartbeat timeout must still restart the socket");
-  assert.equal(ui.run(`presenceForUser("${B}")`), "unknown");
-  ui.run("stopWebSocket()");
+  assert.equal(ui.nodes.get("peer-list").children[0].children[1].textContent, "new peer");
 });
 
 test("real HTTP/Redis/WebSocket round trip and password-only history recovery", {

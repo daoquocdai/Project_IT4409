@@ -19,6 +19,7 @@ type LastMessage struct {
 	Seq              int64
 	SenderExternalID string
 	Content          string
+	RecalledAt       *time.Time
 	CreatedAt        time.Time
 }
 

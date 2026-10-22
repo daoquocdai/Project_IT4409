@@ -54,7 +54,8 @@ SELECT
     m.seq,
     m.kind,
     m.content_format,
-    m.content,
+    COALESCE(m.content, '') AS content,
+    m.recalled_at,
     m.created_at
 FROM messages AS m
 JOIN threads AS t ON t.id = m.thread_id
@@ -90,7 +91,7 @@ WITH created AS (
         sqlc.arg(content)
     )
     RETURNING id, external_id, thread_id, sender_id, seq,
-              kind, content_format, content, created_at
+              kind, content_format, content, recalled_at, created_at
 )
 SELECT
     created.id,
@@ -101,7 +102,8 @@ SELECT
     created.seq,
     created.kind,
     created.content_format,
-    created.content,
+    COALESCE(created.content, '') AS content,
+    created.recalled_at,
     created.created_at
 FROM created
 JOIN threads AS thread ON thread.id = created.thread_id
@@ -117,7 +119,8 @@ SELECT
     m.seq,
     m.kind,
     m.content_format,
-    m.content,
+    COALESCE(m.content, '') AS content,
+    m.recalled_at,
     m.created_at
 FROM messages AS m
 JOIN threads AS t ON t.id = m.thread_id

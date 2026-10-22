@@ -7,6 +7,7 @@ import (
 )
 
 const MessageCreatedType = "message.created"
+const MessageRecalledType = "message.recalled"
 
 type MessageCreated struct {
 	MessageID     string
@@ -19,6 +20,16 @@ type MessageCreated struct {
 	ContentFormat string
 	Content       string
 	CreatedAt     time.Time
+}
+
+type MessageRecalled struct {
+	EventID      string
+	ChangeSeq    int64
+	MessageID    string
+	ThreadID     string
+	SenderID     string
+	RecipientIDs []string
+	RecalledAt   time.Time
 }
 
 func FromMessage(message model.Message, recipients []string) MessageCreated {

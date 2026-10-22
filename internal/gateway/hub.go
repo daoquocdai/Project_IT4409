@@ -246,6 +246,27 @@ func (h *Hub) DispatchThreadUpdated(event threadevent.ThreadUpdated) error {
 	return nil
 }
 
+func (h *Hub) DispatchRecall(event messageevent.MessageRecalled) error {
+	for _, recipientID := range event.RecipientIDs {
+		data, err := json.Marshal(struct {
+			Type        string    `json:"type"`
+			EventID     string    `json:"event_id"`
+			ChangeSeq   int64     `json:"change_seq"`
+			MessageID   string    `json:"message_id"`
+			ThreadID    string    `json:"thread_id"`
+			SenderID    string    `json:"sender_id"`
+			RecipientID string    `json:"recipient_id"`
+			RecalledAt  time.Time `json:"recalled_at"`
+		}{Type: messageevent.MessageRecalledType, EventID: event.EventID, ChangeSeq: event.ChangeSeq, MessageID: event.MessageID,
+			ThreadID: event.ThreadID, SenderID: event.SenderID, RecipientID: recipientID, RecalledAt: event.RecalledAt})
+		if err != nil {
+			return err
+		}
+		h.queueTo(recipientID, data)
+	}
+	return nil
+}
+
 func (h *Hub) queueTo(recipientID string, data []byte) {
 	h.mu.RLock()
 	if h.stopping {

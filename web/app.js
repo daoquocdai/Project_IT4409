@@ -31,6 +31,15 @@ const historyElement = document.querySelector("#history");
 const messageForm = document.querySelector("#message-form");
 const contentInput = document.querySelector("#content");
 const sendButton = document.querySelector("#send-button");
+const emojiWrapper = document.querySelector("#emoji-wrapper");
+const emojiToggle = document.querySelector("#emoji-toggle");
+const emojiPicker = document.querySelector("#emoji-picker");
+const attachmentButton = document.querySelector("#attachment-button");
+const attachmentInput = document.querySelector("#attachment-input");
+const attachmentDraft = document.querySelector("#attachment-draft");
+const attachmentName = document.querySelector("#attachment-name");
+const attachmentSize = document.querySelector("#attachment-size");
+const removeAttachmentButton = document.querySelector("#remove-attachment");
 const loadOlderButton = document.querySelector("#load-older-button");
 const noticeElement = document.querySelector("#notice");
 const errorElement = document.querySelector("#error");
@@ -51,6 +60,37 @@ const e2eePending = document.querySelector("#e2ee-pending");
 const e2eePendingInfo = document.querySelector("#e2ee-pending-info");
 const e2eePendingList = document.querySelector("#e2ee-pending-list");
 const e2eeDecryptRetry = document.querySelector("#e2ee-decrypt-retry");
+const emptyConversation = document.querySelector("#empty-conversation");
+const activeConversation = document.querySelector("#active-conversation");
+const conversationAvatar = document.querySelector("#conversation-avatar");
+const accountAvatar = document.querySelector("#account-avatar");
+const conversationSearch = document.querySelector("#conversation-search");
+const conversationFilters = document.querySelector("#conversation-filters");
+const newConversationButton = document.querySelector("#new-conversation-button");
+const emptyNewConversation = document.querySelector("#empty-new-conversation");
+const composeDialog = document.querySelector("#new-conversation-dialog");
+const closeComposeDialog = document.querySelector("#close-compose-dialog");
+const directTab = document.querySelector("#direct-tab");
+const groupTab = document.querySelector("#group-tab");
+const directComposePanel = document.querySelector("#direct-compose-panel");
+const peopleSearch = document.querySelector("#people-search");
+const groupUserSearch = document.querySelector("#group-user-search");
+const selectedMembers = document.querySelector("#selected-members");
+const callButton = document.querySelector("#call-button");
+const moreButton = document.querySelector("#more-button");
+const closeInfoButton = document.querySelector("#close-info-button");
+const groupManagement = document.querySelector("#group-management");
+const infoAvatar = document.querySelector("#info-avatar");
+const infoTitle = document.querySelector("#info-title");
+const infoDescription = document.querySelector("#info-description");
+const newMessagesButton = document.querySelector("#new-messages-button");
+const backToListButton = document.querySelector("#back-to-list-button");
+const emojis = ["🙂", "😀", "😂", "🥰", "😍", "😎", "🥹", "😭", "😡", "🤔", "👍", "👎", "❤️", "🔥", "🎉", "👏", "🙏", "💯"];
+const emojiOnlyPattern = /^(?:(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*)(?:\s*))+$/u;
+const maximumAttachmentBytes = 20 * 1024 * 1024;
+const previewImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+let selectedAttachmentFile = null;
+const attachmentObjectURLs = new Set();
 const e2eeLabels = {
   initializing: "Đang chuẩn bị chat...", ready: "Đã mã hóa đầu cuối.",
   error: "Chưa thể mở cuộc trò chuyện. Vui lòng đăng nhập lại.",
@@ -68,8 +108,9 @@ const state = {
   socket: null, socketConnecting: false, socketGeneration: 0,
   socketTicketAbort: null, socketHealthTimer: null, socketLastActivityAt: 0,
   socketSummaryStale: false, reconnectTimer: null, reconnectDelay: 1000,
-  onlineUserIDs: new Set(), presenceReady: false, presenceRevision: null,
+  recallCursor: 0, recallSyncRequest: null,
   e2ee: null, vaultKey: "", authBusy: false,
+  conversationFilter: "all", conversationSearch: "",
 };
 
 function showNotice(message) {
@@ -172,6 +213,11 @@ function updateSendButton() {
   sendButton.textContent = !encrypted && pending ? "Gửi lại" : "Gửi";
   sendButton.disabled = !allowed || Boolean(pending?.inFlight) || Boolean(cache?.e2eeSending);
   contentInput.disabled = !allowed || Boolean(cache?.e2eeSending);
+  emojiToggle.disabled = contentInput.disabled;
+  attachmentButton.disabled = !allowed || Boolean(cache?.e2eeSending);
+  attachmentButton.title = cache?.summary?.kind === "group"
+    ? "Tệp E2EE cho nhóm chưa được hỗ trợ" : "Đính kèm tệp (tối đa 20 MiB)";
+  if (emojiToggle.disabled) closeEmojiPicker();
   // HTML maxlength counts UTF-16 units; group validation counts Unicode points.
   if (encrypted) contentInput.maxLength = 2000;
   else contentInput.removeAttribute("maxlength");
@@ -182,54 +228,81 @@ function validGroupContent(content) {
   const length = [...trimmed].length;
   return length >= 1 && length <= 1000 && !trimmed.includes("\u0000");
 }
-function validPresenceUserID(id) {
-  return typeof id === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) &&
-    id !== "00000000-0000-0000-0000-000000000000";
+function isEmojiOnly(content) {
+  return emojiOnlyPattern.test(content.trim());
 }
-function presenceForUser(userID) {
-  if (!state.presenceReady || !validPresenceUserID(userID)) return "unknown";
-  return state.onlineUserIDs.has(userID.toLowerCase()) ? "online" : "offline";
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
-function updatePresenceLabel(label, userID) {
-  const presence = presenceForUser(userID);
-  label.className = `presence presence-${presence}`;
-  label.dataset.presenceUserId = userID;
-  label.textContent = { online: "Trực tuyến", offline: "Ngoại tuyến", unknown: "Chưa xác định" }[presence];
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
-function createPresenceLabel(userID) {
-  const label = document.createElement("span");
-  updatePresenceLabel(label, userID);
-  return label;
+function base64ToBytes(value) {
+  const binary = atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
-function renderPeerPresence() {
-  const peerID = state.currentCache?.summary?.kind === "direct" ? state.currentCache.summary.peer?.id : "";
-  peerPresence.hidden = !peerID;
-  if (peerID) updatePresenceLabel(peerPresence, peerID);
-  else {
-    peerPresence.textContent = "";
-    delete peerPresence.dataset.presenceUserId;
-  }
+function safeAttachmentName(name) {
+  const normalized = String(name || "attachment").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  return [...(normalized || "attachment")].slice(0, 180).join("");
 }
-function updatePresenceUI() {
-  // Only touch labels: forms, selection, drafts, read position and E2EE stay intact.
-  for (const root of [directThreadList, peerList, memberList]) {
-    for (const label of root.querySelectorAll("[data-presence-user-id]")) {
-      updatePresenceLabel(label, label.dataset.presenceUserId);
+async function encryptAttachment(file) {
+  if (!(file instanceof Blob) || file.size <= 0) throw new Error("Tệp phải lớn hơn 0 byte.");
+  if (file.size > maximumAttachmentBytes) throw new Error("Tệp không được vượt quá 20 MiB.");
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, key, await file.arrayBuffer());
+  const rawKey = new Uint8Array(await crypto.subtle.exportKey("raw", key));
+  return { blob: new Blob([encrypted], { type: "application/octet-stream" }), descriptor: {
+    version: 1, algorithm: "AES-256-GCM", key: bytesToBase64(rawKey), iv: bytesToBase64(iv),
+    name: safeAttachmentName(file.name), mimeType: file.type || "application/octet-stream", sizeBytes: file.size,
+  } };
+}
+function parseAttachmentMessage(value) {
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed?.version !== 1 || parsed.type !== "attachment" || typeof parsed.text !== "string" ||
+        !Array.isArray(parsed.attachments) || parsed.attachments.length < 1 || parsed.attachments.length > 5) return null;
+    for (const item of parsed.attachments) {
+      if (typeof item?.attachmentId !== "string" || item.algorithm !== "AES-256-GCM" ||
+          typeof item.key !== "string" || base64ToBytes(item.key).length !== 32 ||
+          typeof item.iv !== "string" || base64ToBytes(item.iv).length !== 12 ||
+          typeof item.name !== "string" || typeof item.mimeType !== "string" ||
+          !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0 || item.sizeBytes > maximumAttachmentBytes) return null;
     }
-  }
-  renderPeerPresence();
+    return parsed;
+  } catch { return null; }
 }
-function invalidatePresence() {
-  state.onlineUserIDs = new Set();
-  state.presenceReady = false;
-  state.presenceRevision = null;
-  updatePresenceUI();
+function clearSelectedAttachment() {
+  selectedAttachmentFile = null;
+  attachmentInput.value = "";
+  attachmentDraft.hidden = true;
+  attachmentName.textContent = "";
+  attachmentSize.textContent = "";
+}
+function revokeAttachmentURLs() {
+  for (const url of attachmentObjectURLs) URL.revokeObjectURL(url);
+  attachmentObjectURLs.clear();
+}
+function closeEmojiPicker({ restoreFocus = false } = {}) {
+  emojiPicker.hidden = true;
+  emojiToggle.setAttribute("aria-expanded", "false");
+  if (restoreFocus && !contentInput.disabled) contentInput.focus();
 }
 function renderThreadHeading() {
   const cache = state.currentCache;
   const thread = cache?.summary;
+  emptyConversation.hidden = Boolean(thread);
+  activeConversation.hidden = !thread;
+  if (!thread) {
+    membersPanel.hidden = true;
+    return;
+  }
   peerName.textContent = thread ? threadTitle(thread) : "Chọn cuộc trò chuyện";
+  conversationAvatar.textContent = avatarInitial(threadTitle(thread));
   const group = thread?.kind === "group";
   renderPeerPresence();
   threadStatus.textContent = group
@@ -239,12 +312,12 @@ function renderThreadHeading() {
     : thread?.kind === "direct" || hasEncryptedMessages(cache)
       ? e2eeLabels[state.e2ee?.snapshot().status] || e2eeLabels.initializing
       : "";
-  membersButton.hidden = !group || !cache.active;
-  if (!group || !cache.active) membersPanel.hidden = true;
+  membersButton.hidden = !cache.active;
+  if (!cache.active) membersPanel.hidden = true;
   e2eeDecryptRetry.hidden = !cache || ![...cache.decryptedViews.values()].some((view) => view.status === "error");
   e2eeDecryptRetry.disabled = !state.e2ee?.canRead();
   updateSendButton();
-  if (group && !membersPanel.hidden) renderMembers(cache);
+  if (!membersPanel.hidden) renderConversationInfo(cache);
 }
 function decodeSubject(token) {
   try {
@@ -273,7 +346,8 @@ async function apiRequest(path, options = {}, authenticated = true) {
   if (authenticated && response.status === 401 &&
       currentSessionMatches(requestSessionVersion, requestToken)) {
     clearSession();
-    showError("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+    if (location.pathname === "/app" && typeof location.replace === "function") location.replace("/login");
+    else showError("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
     throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
   }
   return readResponse(response);
@@ -294,6 +368,8 @@ async function sendMessageWithRetry(snapshot, messageID, content) {
   }
 }
 function resetConversation() {
+  revokeAttachmentURLs();
+  clearSelectedAttachment();
   state.threadID = "";
   state.currentCache = null;
   renderPeerPresence();
@@ -307,6 +383,8 @@ function resetConversation() {
   historyElement.append(empty);
   contentInput.value = "";
   membersPanel.hidden = true;
+  emptyConversation.hidden = false;
+  activeConversation.hidden = true;
   membersButton.hidden = true;
   updateSendButton();
   loadOlderButton.hidden = true;
@@ -334,6 +412,8 @@ function clearSession() {
   state.threadListRequest = null;
   state.threadListDirty = false;
   state.threadListCatchup = false;
+  state.recallCursor = 0;
+  state.recallSyncRequest = null;
   state.membershipSerial = 0;
   state.groupCreation = null;
   if (state.readFrame !== null) cancelAnimationFrame(state.readFrame);
@@ -345,7 +425,9 @@ function clearSession() {
   if (state.threadSummaryTimer !== null) clearTimeout(state.threadSummaryTimer);
   state.threadSummaryTimer = null;
   resetConversation();
-  authView.hidden = false;
+  // Authentication has dedicated pages. Never reveal the legacy auth fixture
+  // while /app is clearing a session or redirecting after logout/expiry.
+  if (authView) authView.hidden = true;
   chatView.hidden = true;
   logoutButton.hidden = true;
   currentUsername.textContent = "";
@@ -360,10 +442,11 @@ function clearSession() {
   e2eePendingList.replaceChildren();
 }
 function showChatView() {
-  authView.hidden = true;
+  if (authView) authView.hidden = true;
   chatView.hidden = false;
   logoutButton.hidden = false;
   currentUsername.textContent = state.currentUsername;
+  accountAvatar.textContent = avatarInitial(state.currentUsername);
 }
 function currentSessionMatches(sessionVersion, token) {
   return sessionVersion === state.sessionVersion && token === state.token && Boolean(token);
@@ -379,7 +462,7 @@ function newThreadCache(threadID) {
     syncedSeq: 0, nextCursor: null, lastReadSeq: 0, peerLastReadSeq: 0,
     initialHistoryRequest: null, catchupRequest: null, catchupTargetSeq: 0,
     olderRequest: null, readRequest: null, pendingReadSeq: 0,
-    pendingSend: null, draftContent: "", decryptedViews: new Map(), decryptJobs: new Map(),
+    pendingSend: null, draftContent: "", preparedAttachment: null, decryptedViews: new Map(), decryptJobs: new Map(), animatedMessageIDs: new Set(), recalls: new Map(),
     payloadConflict: false, e2eeSending: false };
 }
 function cacheForThread(threadID) {
@@ -403,6 +486,25 @@ function membershipSnapshotMatches(snapshot) {
 }
 function peerByID(id) { return state.users.find((user) => user.id === id); }
 function threadTitle(thread) { return thread.kind === "group" ? thread.name : thread.peer?.username || "Chat 1-1"; }
+function avatarInitial(value) {
+  return [...String(value || "H").trim()][0]?.toLocaleUpperCase("vi-VN") || "H";
+}
+function threadTimestamp(thread) {
+  return new Date(thread.last_message?.created_at || thread.created_at || 0).getTime();
+}
+function compactTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  return date.toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" });
+}
+function threadPreview(thread) {
+  if (!thread.last_message) return thread.kind === "group" ? `${thread.member_count} thành viên` : "Bắt đầu trò chuyện";
+  if (thread.last_message.recalled_at) return "Tin nhắn đã được thu hồi";
+  if (thread.kind === "direct") return "Tin nhắn được mã hóa đầu cuối";
+  return thread.last_message.content || "Tin nhắn mới";
+}
 function directThreadForPeer(peerID) {
   return [...state.threads.values()].find((cache) => cache.summary?.kind === "direct" &&
     cache.summary.peer?.id === peerID);
@@ -410,21 +512,28 @@ function directThreadForPeer(peerID) {
 function renderPeerList() {
   directThreadList.replaceChildren();
   groupThreadList.replaceChildren();
-  for (const cache of state.threads.values()) {
+  const query = state.conversationSearch.toLocaleLowerCase("vi-VN");
+  const caches = [...state.threads.values()].filter((cache) => {
     const thread = cache.summary;
-    if (!thread) continue;
+    if (!thread) return false;
+    if (state.conversationFilter === "group" && thread.kind !== "group") return false;
+    if (state.conversationFilter === "unread" && Number(thread.unread_count || 0) < 1) return false;
+    return !query || threadTitle(thread).toLocaleLowerCase("vi-VN").includes(query) ||
+      (thread.kind === "group" && threadPreview(thread).toLocaleLowerCase("vi-VN").includes(query));
+  }).sort((left, right) => threadTimestamp(right.summary) - threadTimestamp(left.summary));
+  for (const cache of caches) {
+    const thread = cache.summary;
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `peer${thread.id === state.threadID ? " active" : ""}`;
-    const name = document.createElement("span");
-    name.textContent = `${threadTitle(thread)}${thread.kind === "group"
-      ? cache.active ? ` · ${thread.member_count} người` : " · Đã rời (lịch sử)" : ""}`;
-    if (thread.kind === "direct") {
-      name.className = "peer-identity";
-      name.append(createPresenceLabel(thread.peer?.id));
-    }
-    button.append(name);
     const unread = cache.active ? Number(thread.unread_count || 0) : 0;
+    button.className = `conversation-item${thread.id === state.threadID ? " active" : ""}${unread ? " unread" : ""}`;
+    const avatar = document.createElement("span"); avatar.className = `avatar ${thread.kind === "group" ? "avatar-group" : ""}`; avatar.textContent = avatarInitial(threadTitle(thread));
+    const copy = document.createElement("span"); copy.className = "conversation-copy";
+    const top = document.createElement("span"); top.className = "conversation-top";
+    const name = document.createElement("strong"); name.textContent = threadTitle(thread);
+    const time = document.createElement("time"); time.textContent = compactTime(thread.last_message?.created_at || thread.created_at);
+    const preview = document.createElement("span"); preview.className = "conversation-preview"; preview.textContent = cache.active ? threadPreview(thread) : "Bạn đã rời nhóm · Xem lịch sử";
+    top.append(name, time); copy.append(top, preview); button.append(avatar, copy);
     if (unread > 0) {
       const badge = document.createElement("span");
       badge.className = "unread-badge";
@@ -433,15 +542,13 @@ function renderPeerList() {
       button.append(badge);
     }
     button.addEventListener("click", () => openThread(thread.id));
-    (thread.kind === "group" ? groupThreadList : directThreadList).append(button);
+    directThreadList.append(button);
   }
-  for (const [list, text] of [[directThreadList, "Chưa có cuộc trò chuyện 1-1."],
-    [groupThreadList, "Chưa tham gia nhóm nào."]]) {
-    if (list.children.length) continue;
+  if (!directThreadList.children.length) {
     const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = text;
-    list.append(empty);
+    empty.className = "conversation-list-empty";
+    empty.textContent = query || state.conversationFilter !== "all" ? "Không tìm thấy cuộc trò chuyện phù hợp." : "Chưa có cuộc trò chuyện nào.";
+    directThreadList.append(empty);
   }
   peerList.replaceChildren();
   const newPeers = state.users.filter((user) => user.id !== state.currentUserID && !directThreadForPeer(user.id));
@@ -449,12 +556,11 @@ function renderPeerList() {
   for (const user of newPeers) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "peer";
-    const name = document.createElement("span");
-    name.className = "peer-identity";
-    name.textContent = user.username;
-    name.append(createPresenceLabel(user.id));
-    button.append(name);
+    button.className = "person-option";
+    button.dataset.name = user.username.toLocaleLowerCase("vi-VN");
+    const avatar = document.createElement("span"); avatar.className = "avatar"; avatar.textContent = avatarInitial(user.username);
+    const label = document.createElement("span"); label.textContent = user.username;
+    button.append(avatar, label);
     button.disabled = !state.e2ee?.canRead();
     button.addEventListener("click", () => openDirect(user.id));
     peerList.append(button);
@@ -479,11 +585,13 @@ async function loadUsers() {
       groupUsers.replaceChildren();
       for (const user of users.filter((user) => user.id !== state.currentUserID)) {
         const label = document.createElement("label");
+        label.dataset.name = user.username.toLocaleLowerCase("vi-VN");
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox"; checkbox.value = user.id; checkbox.checked = selected.has(user.id);
         const name = document.createElement("span"); name.textContent = user.username;
         label.append(checkbox, name); groupUsers.append(label);
       }
+      renderSelectedMembers();
       renderPeerList();
       if (state.currentCache) renderMembers(state.currentCache);
     } finally {
@@ -545,6 +653,8 @@ function deactivateGroup(cache) {
 }
 function updateThreadFromMessage(message) {
   const cache = cacheForThread(message.thread_id);
+  const recalledAt = cache.recalls.get(message.id || message.message_id);
+  if (recalledAt) message = { ...message, content: "", recalled_at: recalledAt };
   if (!cache.summary || (message.content_format === "e2ee_v2" && cache.summary.kind !== "direct")) {
     scheduleThreadSummaryRefresh();
   }
@@ -555,6 +665,10 @@ function updateThreadFromMessage(message) {
   if (!thread) scheduleThreadSummaryRefresh();
   else {
     thread.last_seq = Math.max(Number(thread.last_seq || 0), seq);
+    if (!thread.last_message || seq >= Number(thread.last_message.seq || 0)) {
+      thread.last_message = { seq, sender_id: message.sender_id, content: message.content,
+        recalled_at: message.recalled_at || null, created_at: message.created_at };
+    }
     if (cache.active && receivedMessage(message) && seq > cache.lastReadSeq) thread.unread_count += 1;
   }
   if (message.kind === "system") {
@@ -654,14 +768,31 @@ function displayName(userID) {
 
 function mergeMessages(cache, messages) {
   try {
-    for (const message of messages) {
+    const mergeable = [];
+    for (const raw of messages) {
+      const message = { ...raw };
       const id = message.id || message.message_id;
       if (message.thread_id !== cache.threadID || [...state.threads.values()].some((other) =>
         other !== cache && other.messageIDs.has(id))) {
         throw new Error("UUID message xuất hiện với thread khác; giữ nguyên nội dung và khóa đã lưu.");
       }
+      const recalledAt = message.recalled_at || cache.recalls.get(id);
+      if (recalledAt) {
+        cache.recalls.set(id, recalledAt);
+        message.recalled_at = recalledAt;
+        message.content = "";
+        const existingSeq = cache.messageIDs.get(id);
+        const existing = existingSeq === undefined ? null : cache.messages.get(existingSeq);
+        if (existing) {
+          existing.recalled_at = recalledAt;
+          existing.content = "";
+          cache.decryptedViews.delete(id);
+          continue;
+        }
+      }
+      mergeable.push(message);
     }
-    const changed = MiniHermesRealtime.merge(cache.messages, cache.messageIDs, messages);
+    const changed = MiniHermesRealtime.merge(cache.messages, cache.messageIDs, mergeable);
     processE2EEMessages(cache);
     return changed;
   } catch (error) {
@@ -677,6 +808,10 @@ function mergeMessages(cache, messages) {
 function processE2EEMessages(cache, retryErrors = false) {
   const client = state.e2ee;
   for (const message of cache.messages.values()) {
+    if (message.recalled_at || cache.recalls.has(message.id)) {
+      cache.decryptedViews.delete(message.id);
+      continue;
+    }
     if (message.content_format !== "e2ee_v2" && cache.summary?.kind !== "direct") continue;
     if (!cache.summary?.peer?.id) {
       cache.decryptedViews.set(message.id, { status: "pending" });
@@ -693,7 +828,7 @@ function processE2EEMessages(cache, retryErrors = false) {
     const snapshot = cacheSnapshot(cache);
     cache.decryptedViews.set(message.id, { status: "pending" });
     const job = client.receive(cache.summary, message).then((view) => {
-      if (!membershipSnapshotMatches(snapshot) || state.e2ee !== client || cache.payloadConflict) return;
+      if (!membershipSnapshotMatches(snapshot) || state.e2ee !== client || cache.payloadConflict || cache.recalls.has(message.id)) return;
       cache.decryptedViews.set(message.id, view);
       if (state.currentCache === cache && cache.messagesLoaded) renderMessages("new");
     }).catch(() => {
@@ -722,6 +857,132 @@ function atConversationBottom() {
   return historyElement.scrollHeight - historyElement.scrollTop - historyElement.clientHeight <= historyBottomTolerance;
 }
 
+async function downloadAndDecryptAttachment(descriptor) {
+  const token = state.token, sessionVersion = state.sessionVersion;
+  const response = await fetch(`/attachments/${encodeURIComponent(descriptor.attachmentId)}/content`, {
+    headers: { Authorization: `Bearer ${token}` }, signal: state.sessionAbort.signal,
+  });
+  if (response.status === 401 && currentSessionMatches(sessionVersion, token)) {
+    clearSession();
+    if (typeof location.replace === "function") location.replace("/login");
+    throw new Error("Phiên đăng nhập đã hết hạn.");
+  }
+  if (!response.ok) throw new Error(response.status === 403 ? "Bạn không có quyền tải tệp này." : "Không tải được tệp đính kèm.");
+  const ciphertext = await response.arrayBuffer();
+  if (ciphertext.byteLength !== descriptor.sizeBytes + 16) throw new Error("Kích thước tệp mã hóa không hợp lệ.");
+  const key = await crypto.subtle.importKey("raw", base64ToBytes(descriptor.key), { name: "AES-GCM" }, false, ["decrypt"]);
+  let plaintext;
+  try {
+    plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(descriptor.iv), tagLength: 128 }, key, ciphertext);
+  } catch {
+    throw new Error("Không thể giải mã tệp; dữ liệu hoặc khóa không hợp lệ.");
+  }
+  if (plaintext.byteLength !== descriptor.sizeBytes) throw new Error("Tệp giải mã không đúng kích thước.");
+  return new Blob([plaintext], { type: descriptor.mimeType });
+}
+
+function attachmentCard(descriptor) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "attachment-card";
+  button.setAttribute("aria-label", `Mở tệp ${descriptor.name}, ${formatBytes(descriptor.sizeBytes)}`);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("aria-hidden", "true"); svg.setAttribute("viewBox", "0 0 24 24");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5");
+  svg.append(path); button.append(svg);
+  const copy = document.createElement("span");
+  const name = document.createElement("strong"); name.textContent = descriptor.name;
+  const size = document.createElement("small"); size.textContent = `${formatBytes(descriptor.sizeBytes)} · Nhấn để mở`;
+  copy.append(name, size); button.append(copy);
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true; size.textContent = `${formatBytes(descriptor.sizeBytes)} · Đang giải mã…`;
+    try {
+      const blob = await downloadAndDecryptAttachment(descriptor);
+      const url = URL.createObjectURL(blob); attachmentObjectURLs.add(url);
+      if (previewImageTypes.has(descriptor.mimeType)) {
+        const image = document.createElement("img");
+        image.className = "attachment-image"; image.src = url; image.alt = descriptor.name;
+        button.replaceWith(image);
+      } else {
+        const link = document.createElement("a"); link.href = url; link.download = descriptor.name;
+        document.body.append(link); link.click(); link.remove();
+        setTimeout(() => { URL.revokeObjectURL(url); attachmentObjectURLs.delete(url); }, 1000);
+        button.disabled = false; size.textContent = `${formatBytes(descriptor.sizeBytes)} · Đã tải xuống`;
+      }
+    } catch (error) {
+      button.disabled = false; size.textContent = `${formatBytes(descriptor.sizeBytes)} · Thử lại`;
+      showError(error instanceof Error ? error.message : "Không mở được tệp đính kèm.");
+    }
+  });
+  return button;
+}
+
+function applyRecall(change, render = true) {
+  const messageID = change.message_id || change.id;
+  const threadID = change.thread_id;
+  if (!messageID || !threadID || !change.recalled_at) return;
+  const cache = cacheForThread(threadID);
+  cache.recalls.set(messageID, change.recalled_at);
+  const seq = cache.messageIDs.get(messageID);
+  const message = seq === undefined ? null : cache.messages.get(seq);
+  if (message) {
+    message.recalled_at = change.recalled_at;
+    message.content = "";
+    cache.decryptedViews.delete(messageID);
+  }
+  if (cache.summary?.last_message && message && Number(cache.summary.last_message.seq) === Number(message.seq)) {
+    cache.summary.last_message.content = "";
+    cache.summary.last_message.recalled_at = change.recalled_at;
+  }
+  const changeSeq = Number(change.change_seq || 0);
+  if (Number.isSafeInteger(changeSeq)) state.recallCursor = Math.max(state.recallCursor, changeSeq);
+  revokeAttachmentURLs();
+  renderPeerList();
+  if (render && state.currentCache === cache && cache.messagesLoaded) renderMessages("preserve");
+  if (!message || !cache.summary) scheduleThreadSummaryRefresh();
+}
+
+async function recallMessage(message, button) {
+  if (!message?.id || message.sender_id !== state.currentUserID || message.recalled_at) return;
+  if (!window.confirm("Thu hồi tin nhắn này? Nội dung và tệp đính kèm sẽ không còn truy cập được.")) return;
+  button.disabled = true;
+  try {
+    const result = await apiRequest(`/messages/${encodeURIComponent(message.id)}/recall`, { method: "POST" });
+    applyRecall(result);
+  } catch (error) {
+    button.disabled = false;
+    showError(error);
+  }
+}
+
+async function syncRecallChanges() {
+  if (!state.token) return;
+  if (state.recallSyncRequest) return state.recallSyncRequest;
+  const version = state.sessionVersion, token = state.token;
+  const request = (async () => {
+    try {
+      while (currentSessionMatches(version, token)) {
+        const page = await apiRequest(`/message-changes?after=${state.recallCursor}`);
+        const changes = Array.isArray(page.changes) ? page.changes : [];
+        for (const change of changes) applyRecall(change, false);
+        const previousCursor = state.recallCursor;
+        const next = Number(page.next_cursor || previousCursor);
+        if (Number.isSafeInteger(next)) state.recallCursor = Math.max(previousCursor, next);
+        if (changes.length < 100 || state.recallCursor <= previousCursor) break;
+      }
+      if (state.currentCache?.messagesLoaded) renderMessages("preserve");
+    } catch (error) {
+      if (currentSessionMatches(version, token)) showError(error);
+    } finally {
+      if (state.recallSyncRequest === request) state.recallSyncRequest = null;
+    }
+  })();
+  state.recallSyncRequest = request;
+  return request;
+}
+
 function renderMessages(scrollMode = "preserve") {
   const cache = state.currentCache;
   if (!cache) return;
@@ -737,36 +998,70 @@ function renderMessages(scrollMode = "preserve") {
     empty.textContent = "Chưa có tin nhắn nào.";
     historyElement.append(empty);
   } else {
+    let previousDate = "", previousSender = "", previousKind = "";
+    const lastReadableSent = [...messages].reverse().find((message) => message.kind === "text" && message.sender_id === state.currentUserID);
     for (const message of messages) {
       const sent = message.sender_id === state.currentUserID;
+      const created = new Date(message.created_at);
+      const dateKey = created.toLocaleDateString("vi-VN");
+      if (dateKey !== previousDate) {
+        const divider = document.createElement("div");
+        divider.className = "date-divider";
+        divider.textContent = created.toDateString() === new Date().toDateString() ? "Hôm nay" : dateKey;
+        historyElement.append(divider);
+        previousDate = dateKey; previousSender = ""; previousKind = "";
+      }
       const item = document.createElement("article");
       item.className = `message ${message.kind === "system" ? "system" : sent ? "sent" : "received"}`;
+      if (message.kind === "text" && previousKind === "text" && previousSender === message.sender_id) item.classList.add("continued");
       item.dataset.seq = String(message.seq);
       item.dataset.kind = message.kind;
 
       const content = document.createElement("p");
-      const encrypted = message.content_format === "e2ee_v2" || cache.summary?.kind === "direct";
+      const recalled = Boolean(message.recalled_at || cache.recalls.has(message.id));
+      const encrypted = !recalled && (message.content_format === "e2ee_v2" || cache.summary?.kind === "direct");
       const view = cache.decryptedViews.get(message.id);
       const cryptoState = !encrypted ? "plaintext" : cache.payloadConflict ? "error"
         : state.e2ee?.canRead() ? view?.status || "pending" : "pending";
       item.dataset.cryptoState = cryptoState;
       if (encrypted) item.classList.add(cryptoState === "error" ? "crypto-error" : cryptoState === "ready" ? "crypto-ready" : "crypto-pending");
-      content.textContent = !encrypted ? message.content : cryptoState === "ready" ? view.plaintext
+      const decryptedContent = recalled ? (sent ? "Bạn đã thu hồi một tin nhắn" : "Tin nhắn đã được thu hồi") : !encrypted ? message.content : cryptoState === "ready" ? view.plaintext
         : cryptoState === "error" ? "Không thể đọc tin nhắn. Hãy thử lại."
         : "Đang tải tin nhắn...";
+      const attachmentMessage = message.kind === "text" && (!encrypted || cryptoState === "ready")
+        ? parseAttachmentMessage(decryptedContent) : null;
+      const renderedContent = attachmentMessage ? attachmentMessage.text : decryptedContent;
+      content.textContent = renderedContent;
+      if (recalled) item.classList.add("recalled");
+      if (message.kind === "text" && (!encrypted || cryptoState === "ready") && isEmojiOnly(renderedContent)) {
+        content.classList.add("emoji-message");
+        if ((scrollMode === "new" || scrollMode === "bottom") && !cache.animatedMessageIDs.has(message.id)) {
+          content.classList.add("emoji-message-new");
+        }
+      }
+      cache.animatedMessageIDs.add(message.id);
 
       const meta = document.createElement("small");
-      const time = new Date(message.created_at).toLocaleString("vi-VN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        day: "2-digit",
-        month: "2-digit",
-      });
-      const readStatus = cache.summary?.kind === "direct" && sent && message.seq <= cache.peerLastReadSeq ? " · Đã đọc" : "";
-      meta.textContent = `${displayName(message.sender_id)} · ${time}${readStatus}`;
-      item.append(content, meta);
+      const time = created.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+      const readStatus = cache.summary?.kind === "direct" && sent && message === lastReadableSent && message.seq <= cache.peerLastReadSeq ? " · Đã xem" : "";
+      meta.textContent = `${time}${readStatus}`;
+      if (cache.summary?.kind === "group" && !sent && message.kind === "text" &&
+          (previousSender !== message.sender_id || previousKind !== "text")) {
+        const sender = document.createElement("strong"); sender.className = "message-sender"; sender.textContent = displayName(message.sender_id); item.append(sender);
+      }
+      item.append(content);
+      if (attachmentMessage) for (const attachment of attachmentMessage.attachments) item.append(attachmentCard(attachment));
+      item.append(meta);
+      if (sent && message.kind === "text" && !recalled) {
+        const menu = document.createElement("details"); menu.className = "message-menu";
+        const summary = document.createElement("summary"); summary.textContent = "⋯"; summary.setAttribute("aria-label", "Tùy chọn tin nhắn");
+        const recall = document.createElement("button"); recall.type = "button"; recall.textContent = "Thu hồi";
+        recall.addEventListener("click", () => void recallMessage(message, recall));
+        menu.append(summary, recall); item.append(menu);
+      }
       historyElement.append(item);
       if (encrypted && cryptoState === "ready") view.rendered = true;
+      previousSender = message.sender_id; previousKind = message.kind;
     }
   }
 
@@ -777,6 +1072,7 @@ function renderMessages(scrollMode = "preserve") {
   } else {
     historyElement.scrollTop = previousTop;
   }
+  newMessagesButton.hidden = !(scrollMode === "new" && !wasAtBottom);
   loadOlderButton.hidden = cache.nextCursor === null;
   loadOlderButton.disabled = !cache.messagesLoaded || cache.nextCursor === null || Boolean(cache.olderRequest);
   renderThreadHeading();
@@ -991,31 +1287,8 @@ function handleSocketMessage(data) {
     return;
   }
   if (!event || typeof event !== "object") return;
-  if (event.type === "presence.snapshot") {
-    if (!Number.isSafeInteger(event.revision) || event.revision < 0 ||
-        !Array.isArray(event.online_user_ids) || !event.online_user_ids.every(validPresenceUserID) ||
-        (state.presenceReady && event.revision <= state.presenceRevision)) return;
-    state.onlineUserIDs = new Set(event.online_user_ids.map((id) => id.toLowerCase()));
-    state.presenceRevision = event.revision;
-    state.presenceReady = true;
-    updatePresenceUI();
-    return;
-  }
-  if (event.type === "presence.changed") {
-    if (!Number.isSafeInteger(event.revision) || event.revision < 0 ||
-        !validPresenceUserID(event.user_id) || typeof event.online !== "boolean" ||
-        !state.presenceReady || event.revision <= state.presenceRevision) return;
-    if (event.revision !== state.presenceRevision + 1) {
-      // Use the existing delayed reconnect path to obtain an authoritative snapshot.
-      invalidatePresence();
-      restartWebSocket();
-      return;
-    }
-    const userID = event.user_id.toLowerCase();
-    if (event.online) state.onlineUserIDs.add(userID);
-    else state.onlineUserIDs.delete(userID);
-    state.presenceRevision = event.revision;
-    updatePresenceUI();
+  if (event.type === "message.recalled") {
+    if (event.recipient_id === state.currentUserID) applyRecall(event);
     return;
   }
   if (event.type === "thread.updated") {
@@ -1082,6 +1355,7 @@ async function connectWebSocket() {
         clearSocketHealthTimer();
       }
       showError("");
+      void syncRecallChanges();
       if (state.socketSummaryStale) {
         state.socketSummaryStale = false;
         void loadThreads(true);
@@ -1224,18 +1498,39 @@ async function sendE2EEFromForm() {
   if (!canSendE2EE(cache) || cache.e2eeSending) return;
   const snapshot = conversationSnapshot();
   const content = contentInput.value;
+  const file = selectedAttachmentFile;
+  if (!content.trim() && !file) { showError("Hãy nhập tin nhắn hoặc chọn một tệp."); return; }
   cache.draftContent = content;
   cache.e2eeSending = true;
   updateSendButton();
   showError("");
   try {
-    const message = await client.send(structuredClone(cache.summary), content);
+    let plaintext = content, attachmentIDs = [];
+    if (file) {
+      let prepared = cache.preparedAttachment;
+      if (!prepared || prepared.file !== file || prepared.text !== content) {
+        const encrypted = await encryptAttachment(file);
+        const form = new FormData();
+        form.append("file", encrypted.blob, "attachment.bin");
+        const uploaded = await apiRequest(`/threads/${encodeURIComponent(cache.threadID)}/attachments`, { method: "POST", body: form });
+        encrypted.descriptor.attachmentId = uploaded.attachmentId;
+        plaintext = JSON.stringify({ version: 1, type: "attachment", text: content.trim(), attachments: [encrypted.descriptor] });
+        if ([...plaintext].length > 1000) throw new Error("Tên tệp hoặc nội dung quá dài để gửi an toàn.");
+        prepared = { file, text: content, plaintext, attachmentIDs: [uploaded.attachmentId] };
+        cache.preparedAttachment = prepared;
+      }
+      plaintext = prepared.plaintext;
+      attachmentIDs = prepared.attachmentIDs;
+    }
+    const message = await client.send(structuredClone(cache.summary), plaintext, attachmentIDs);
     if (!membershipSnapshotMatches(snapshot) || state.e2ee !== client) return;
     const accepted = acceptMessage(message);
     if (!accepted.conflict) updateThreadFromMessage(message);
     if (cache.draftContent === content) cache.draftContent = "";
+    cache.preparedAttachment = null;
     if (state.currentCache === cache) {
       if (contentInput.value === content) contentInput.value = "";
+      if (selectedAttachmentFile === file) clearSelectedAttachment();
       renderMessages(currentConversationMatches(snapshot) ? "bottom" : "new");
     }
   } catch (error) {
@@ -1339,11 +1634,17 @@ async function openThread(threadID) {
   const cache = state.threads.get(threadID);
   if (!cache?.summary) return;
   if (state.currentCache) state.currentCache.draftContent = contentInput.value;
+  if (state.threadID !== threadID) {
+    clearSelectedAttachment();
+    revokeAttachmentURLs();
+  }
   state.conversationVersion += 1;
   state.threadID = threadID;
   state.currentCache = cache;
+  chatView.hidden = false;
   contentInput.value = cache.draftContent;
   membersPanel.hidden = true;
+  if (composeDialog.open) composeDialog.close();
   renderPeerList();
   renderThreadHeading();
   showError("");
@@ -1386,6 +1687,7 @@ async function openDirect(peerID) {
     if (!currentSessionMatches(sessionVersion, token)) return;
     reconcileThreadSummary(thread);
     renderPeerList();
+    if (composeDialog.open) composeDialog.close();
     if (version === state.conversationVersion) await openThread(thread.id);
   } catch (error) {
     if (version === state.conversationVersion && currentSessionMatches(sessionVersion, token)) showError(error);
@@ -1424,6 +1726,18 @@ function renderMembers(cache) {
   if ([...addMemberUser.options].some((option) => option.value === selected)) addMemberUser.value = selected;
   addMemberButton.disabled = !admin || !cache.members || !addMemberUser.options.length || Boolean(cache.memberMutation);
   leaveButton.disabled = !canUseThread(cache) || Boolean(cache.memberMutation);
+}
+function renderConversationInfo(cache = state.currentCache) {
+  if (!cache?.summary || membersPanel.hidden) return;
+  const thread = cache.summary;
+  const title = threadTitle(thread);
+  infoAvatar.textContent = avatarInitial(title);
+  infoTitle.textContent = title;
+  infoDescription.textContent = thread.kind === "group"
+    ? `${thread.member_count} thành viên · ${thread.role === "admin" ? "Bạn là quản trị viên" : "Bạn là thành viên"}`
+    : "Cuộc trò chuyện được mã hóa đầu cuối";
+  groupManagement.hidden = thread.kind !== "group";
+  if (thread.kind === "group") renderMembers(cache);
 }
 async function loadMembers(cache = state.currentCache) {
   if (!cache?.active || cache.summary?.kind !== "group") return;
@@ -1506,6 +1820,76 @@ async function recoverCreatedGroup(creation) {
   }
 }
 
+function openComposeDialog(mode = "direct") {
+  setComposeMode(mode);
+  if (!composeDialog.open) composeDialog.showModal();
+  requestAnimationFrame(() => (mode === "group" ? groupForm.elements.name : peopleSearch).focus());
+}
+function setComposeMode(mode) {
+  const group = mode === "group";
+  directTab.setAttribute("aria-selected", String(!group));
+  groupTab.setAttribute("aria-selected", String(group));
+  directComposePanel.hidden = group;
+  groupForm.hidden = !group;
+}
+function renderSelectedMembers() {
+  selectedMembers.replaceChildren();
+  for (const checkbox of groupUsers.querySelectorAll('input:checked')) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "member-chip";
+    chip.textContent = `${checkbox.nextElementSibling?.textContent || "Thành viên"} ×`;
+    chip.setAttribute("aria-label", `Bỏ chọn ${checkbox.nextElementSibling?.textContent || "thành viên"}`);
+    chip.addEventListener("click", () => { checkbox.checked = false; renderSelectedMembers(); });
+    selectedMembers.append(chip);
+  }
+}
+
+newConversationButton.addEventListener("click", () => openComposeDialog("direct"));
+emptyNewConversation.addEventListener("click", () => openComposeDialog("direct"));
+closeComposeDialog.addEventListener("click", () => composeDialog.close());
+directTab.addEventListener("click", () => setComposeMode("direct"));
+groupTab.addEventListener("click", () => setComposeMode("group"));
+composeDialog.addEventListener("click", (event) => {
+  if (event.target === composeDialog) composeDialog.close();
+});
+conversationSearch.addEventListener("input", () => {
+  state.conversationSearch = conversationSearch.value.trim();
+  renderPeerList();
+});
+conversationFilters.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-filter]");
+  if (!button) return;
+  state.conversationFilter = button.dataset.filter;
+  for (const item of conversationFilters.querySelectorAll("button")) {
+    const active = item === button;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-pressed", String(active));
+  }
+  renderPeerList();
+});
+peopleSearch.addEventListener("input", () => {
+  const query = peopleSearch.value.trim().toLocaleLowerCase("vi-VN");
+  for (const option of peerList.querySelectorAll(".person-option")) option.hidden = Boolean(query) && !option.dataset.name.includes(query);
+});
+groupUserSearch.addEventListener("input", () => {
+  const query = groupUserSearch.value.trim().toLocaleLowerCase("vi-VN");
+  for (const option of groupUsers.querySelectorAll("label")) option.hidden = Boolean(query) && !option.dataset.name.includes(query);
+});
+groupUsers.addEventListener("change", renderSelectedMembers);
+closeInfoButton.addEventListener("click", () => { membersPanel.hidden = true; });
+callButton.addEventListener("click", () => showNotice("Gọi điện đang được phát triển và chưa khả dụng trong phiên bản này."));
+moreButton.addEventListener("click", () => showNotice("Các thao tác bổ sung sẽ xuất hiện tại đây khi được hỗ trợ."));
+newMessagesButton.addEventListener("click", () => {
+  historyElement.scrollTop = historyElement.scrollHeight;
+  newMessagesButton.hidden = true;
+  scheduleReadMarker();
+});
+backToListButton.addEventListener("click", () => {
+  membersPanel.hidden = true;
+  chatView.hidden = true;
+});
+
 groupForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (state.groupCreation || !state.token) return;
@@ -1525,7 +1909,9 @@ groupForm.addEventListener("submit", async (event) => {
     state.groupCreation = null;
     createGroupButton.disabled = false;
     groupForm.reset();
+    renderSelectedMembers();
     renderPeerList();
+    if (composeDialog.open) composeDialog.close();
     if (creation.conversationVersion === state.conversationVersion) await openThread(thread.id);
   } catch (error) {
     if (!currentSessionMatches(sessionVersion, token)) return;
@@ -1549,11 +1935,11 @@ recoverGroupButton.addEventListener("click", () => {
 });
 membersButton.addEventListener("click", () => {
   const cache = state.currentCache;
-  if (!cache?.active || cache.summary?.kind !== "group") return;
+  if (!cache?.active) return;
   membersPanel.hidden = !membersPanel.hidden;
   if (!membersPanel.hidden) {
-    renderMembers(cache);
-    if (!cache.members || cache.membersDirty) void loadMembers(cache);
+    renderConversationInfo(cache);
+    if (cache.summary?.kind === "group" && (!cache.members || cache.membersDirty)) void loadMembers(cache);
   }
 });
 addMemberForm.addEventListener("submit", (event) => {
@@ -1744,6 +2130,10 @@ messageForm.addEventListener("submit", async (event) => {
 });
 
 contentInput.addEventListener("input", () => {
+  if (contentInput.style) {
+    contentInput.style.height = "auto";
+    contentInput.style.height = `${Math.min(contentInput.scrollHeight, 144)}px`;
+  }
   const cache = state.currentCache;
   if (!cache) return;
   cache.draftContent = contentInput.value;
@@ -1754,6 +2144,68 @@ contentInput.addEventListener("input", () => {
   } else if (errorElement.textContent === groupContentValidationMessage && validGroupContent(contentInput.value)) {
     showError("");
   }
+});
+contentInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    if (!sendButton.disabled) messageForm.requestSubmit();
+  }
+});
+
+for (const emoji of emojis) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = emoji;
+  button.setAttribute("aria-label", `Chèn ${emoji}`);
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", () => {
+    contentInput.setRangeText(emoji, contentInput.selectionStart, contentInput.selectionEnd, "end");
+    contentInput.dispatchEvent(new Event("input", { bubbles: true }));
+    closeEmojiPicker({ restoreFocus: true });
+  });
+  emojiPicker.append(button);
+}
+emojiToggle.addEventListener("click", () => {
+  const opening = emojiPicker.hidden;
+  emojiPicker.hidden = !opening;
+  emojiToggle.setAttribute("aria-expanded", String(opening));
+  if (opening) emojiPicker.querySelector("button")?.focus();
+});
+document.addEventListener("click", (event) => {
+  if (!emojiWrapper.contains(event.target)) closeEmojiPicker();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !emojiPicker.hidden) {
+    event.preventDefault();
+    closeEmojiPicker({ restoreFocus: true });
+  }
+});
+
+attachmentButton.addEventListener("click", () => {
+  if (state.currentCache?.summary?.kind !== "direct") {
+    showNotice("Tệp mã hóa đầu cuối hiện chỉ hỗ trợ chat cá nhân; chat nhóm chưa có E2EE.");
+    return;
+  }
+  attachmentInput.click();
+});
+attachmentInput.addEventListener("change", () => {
+  const file = attachmentInput.files?.[0] || null;
+  if (!file) { clearSelectedAttachment(); return; }
+  if (file.size <= 0 || file.size > maximumAttachmentBytes) {
+    clearSelectedAttachment();
+    showError(file.size <= 0 ? "Tệp phải lớn hơn 0 byte." : "Tệp không được vượt quá 20 MiB.");
+    return;
+  }
+  selectedAttachmentFile = file;
+  attachmentName.textContent = safeAttachmentName(file.name);
+  attachmentSize.textContent = `${formatBytes(file.size)} · Sẽ mã hóa trước khi tải lên`;
+  attachmentDraft.hidden = false;
+  showError("");
+  contentInput.focus();
+});
+removeAttachmentButton.addEventListener("click", () => {
+  clearSelectedAttachment();
+  contentInput.focus();
 });
 
 refreshUsersButton.addEventListener("click", async () => {
@@ -1768,13 +2220,15 @@ refreshUsersButton.addEventListener("click", async () => {
 
 logoutButton.addEventListener("click", () => {
   clearSession();
-  showNotice("Đã đăng xuất.");
-  showError("");
+  if (typeof location.assign === "function") location.assign("/login?logged_out=1");
 });
 
 loadOlderButton.addEventListener("click", loadOlderMessages);
 
-historyElement.addEventListener("scroll", scheduleReadMarker);
+historyElement.addEventListener("scroll", () => {
+  scheduleReadMarker();
+  if (atConversationBottom()) newMessagesButton.hidden = true;
+});
 window.addEventListener("scroll", scheduleReadMarker);
 window.addEventListener("resize", scheduleReadMarker);
 
@@ -1816,4 +2270,5 @@ if (state.token && state.currentUserID === readSessionValue(sessionVaultUserKey)
   }).finally(() => setAuthBusy(false));
 } else {
   clearSession();
+  if (location.pathname === "/app" && typeof location.replace === "function") location.replace("/login");
 }

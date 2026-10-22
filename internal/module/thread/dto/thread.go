@@ -41,10 +41,11 @@ type PeerResponse struct {
 }
 
 type LastMessageResponse struct {
-	Seq       int64     `json:"seq"`
-	SenderID  string    `json:"sender_id"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	Seq        int64      `json:"seq"`
+	SenderID   string     `json:"sender_id"`
+	Content    string     `json:"content"`
+	RecalledAt *time.Time `json:"recalled_at"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 type ThreadResponse struct {
@@ -83,10 +84,11 @@ func ToThreadResponse(thread model.Thread) ThreadResponse {
 
 	if thread.LastMessage != nil {
 		response.LastMessage = &LastMessageResponse{
-			Seq:       thread.LastMessage.Seq,
-			SenderID:  thread.LastMessage.SenderExternalID,
-			Content:   thread.LastMessage.Content,
-			CreatedAt: thread.LastMessage.CreatedAt,
+			Seq:        thread.LastMessage.Seq,
+			SenderID:   thread.LastMessage.SenderExternalID,
+			Content:    thread.LastMessage.Content,
+			RecalledAt: thread.LastMessage.RecalledAt,
+			CreatedAt:  thread.LastMessage.CreatedAt,
 		}
 	}
 

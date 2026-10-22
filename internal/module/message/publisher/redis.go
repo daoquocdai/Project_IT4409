@@ -45,3 +45,16 @@ func (p *Redis) Publish(ctx context.Context, event messageevent.MessageCreated) 
 		},
 	}).Err()
 }
+
+func (p *Redis) PublishRecall(ctx context.Context, event messageevent.MessageRecalled) error {
+	recipients, err := json.Marshal(event.RecipientIDs)
+	if err != nil {
+		return err
+	}
+	return p.client.XAdd(ctx, &redis.XAddArgs{Stream: p.stream, Values: map[string]any{
+		"event": messageevent.MessageRecalledType, "event_id": event.EventID,
+		"change_seq": strconv.FormatInt(event.ChangeSeq, 10), "message_id": event.MessageID,
+		"thread_id": event.ThreadID, "sender_id": event.SenderID,
+		"recipient_ids": string(recipients), "recalled_at": event.RecalledAt.UTC().Format(time.RFC3339Nano),
+	}}).Err()
+}
