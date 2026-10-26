@@ -249,6 +249,12 @@ Chi tiết xem [Kiến trúc gọi thoại và video](docs/calling-architecture.
 docker compose ps
 docker compose logs --tail 100 api gateway migrate
 Invoke-RestMethod http://localhost:8080/health
+make wasm
+make test
+make build
+go vet ./...
+go test -race ./internal/gateway
+node --test web/e2ee-client.test.cjs
 ```
 
 Kết quả health mong đợi: `{"status":"ok"}`.
@@ -268,6 +274,25 @@ Kiểm tra thủ công:
 5. Cho 2–4 tài khoản gọi nhóm; người vào muộn kết nối được với peer hiện có.
 6. Một người rời không đóng phòng; vào lại có session mới; người thứ 5 nhận `409`.
 7. Kiểm tra Wi‑Fi/4G sau khi cấu hình TURN.
+
+```powershell
+$env:CHAT_API_TEST_URL = 'http://localhost:8080'
+node --test web/e2ee-client.test.cjs
+Remove-Item Env:CHAT_API_TEST_URL
+```
+
+Các bài tích hợp tạo tài khoản/nhóm thử trong database phát triển. Chúng kiểm tra khởi tạo đồng thời, phiên cố định, nhiều thiết bị, recipient offline, khôi phục từ client trống, retry cùng UUID/seq và HTTP/Redis/WebSocket. Có thể dùng [reset tùy chọn](#reset-dữ-liệu-local-tùy-chọn) sau kiểm thử.
+
+Kiểm tra nhanh trên giao diện:
+
+1. A/B đăng ký ở hai profile, mở direct và gửi hai chiều; reload và đăng nhập B bằng mật khẩu trên profile mới để đọc lại cả tin gửi/nhận.
+2. A tạo nhóm với B; thêm, xóa rồi thêm lại B. B chỉ đọc lịch sử thuộc các lần tham gia; khi admin rời, thành viên còn lại sớm nhất được chuyển quyền nếu cần.
+3. Ngắt mạng B, gửi từ A rồi nối lại; tin thiếu được lấy bù, không lặp UUID. Khởi động lại gateway để kiểm tra reconnect.
+4. Mở hai tab B; đọc thread ở tab đang hiển thị và ở cuối chat, theo dõi unread ở tab còn lại. Direct A nhận summary về marker của B mà không có tin mới.
+5. Đăng ký C sau khi A đã mở web, dùng nút “Làm mới danh sách” để thấy C. Với nhóm, thử tin bị từ chối rồi sửa và gửi; lỗi mạng giữ bản gửi lại cho đến khi được xác nhận.
+6. Kiểm tra nhãn presence của A/B trong sidebar, danh sách mở chat, header direct và panel thành viên nhóm. Mở hai tab B, đóng/đăng xuất một tab: B vẫn trực tuyến; đóng tab cuối: A thấy B ngoại tuyến. Chuyển tab hoặc thu nhỏ cửa sổ không làm B ngoại tuyến.
+7. Ngắt mạng ở phía người xem: các nhãn chuyển thành “Chưa xác định”. Khi nối lại, snapshot phải sửa các thay đổi đã bỏ lỡ. Với mất mạng im lặng của B, theo dõi A phát hiện offline sau chu kỳ Ping/Pong (thường khoảng 15 giây); restart gateway rồi xác nhận snapshot mới vẫn được nhận dù revision thấp hơn trước. Trong lúc thử, giữ draft và lựa chọn thành viên để kiểm tra chúng không bị mất.
+8. Gọi 1–1 hai chiều rồi kết thúc; kiểm tra system message. Với gọi nhóm, cho 2–4 người tham gia, một người rời rồi vào lại và kiểm tra giới hạn người thứ năm.
 
 ## Tài liệu
 
