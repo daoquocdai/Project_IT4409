@@ -30,6 +30,16 @@ const historyElement = document.querySelector("#history");
 const messageForm = document.querySelector("#message-form");
 const contentInput = document.querySelector("#content");
 const sendButton = document.querySelector("#send-button");
+const voiceRecordButton = document.querySelector("#voice-record-button");
+const voiceRecording = document.querySelector("#voice-recording");
+const voiceRecordingDuration = document.querySelector("#voice-recording-duration");
+const voiceCancelButton = document.querySelector("#voice-cancel-button");
+const voiceStopButton = document.querySelector("#voice-stop-button");
+const voicePreview = document.querySelector("#voice-preview");
+const voicePreviewPlayer = document.querySelector("#voice-preview-player");
+const voicePreviewDuration = document.querySelector("#voice-preview-duration");
+const voiceDiscardButton = document.querySelector("#voice-discard-button");
+const voiceSendButton = document.querySelector("#voice-send-button");
 const emojiWrapper = document.querySelector("#emoji-wrapper");
 const emojiToggle = document.querySelector("#emoji-toggle");
 const emojiPicker = document.querySelector("#emoji-picker");
@@ -88,9 +98,17 @@ const backToListButton = document.querySelector("#back-to-list-button");
 const emojis = ["🙂", "😀", "😂", "🥰", "😍", "😎", "🥹", "😭", "😡", "🤔", "👍", "👎", "❤️", "🔥", "🎉", "👏", "🙏", "💯"];
 const emojiOnlyPattern = /^(?:(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*)(?:\s*))+$/u;
 const maximumAttachmentBytes = 20 * 1024 * 1024;
+const maximumVoiceBytes = 5 * 1024 * 1024;
 const previewImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
 let selectedAttachmentFile = null;
 const attachmentObjectURLs = new Set();
+let voiceDraft = null;
+let voicePreviewURL = null;
+let voiceState = "idle";
+let voiceTimer = null;
+let voiceRecorder = null;
+let voicePreviewPlayButton = null;
+let voicePreviewProgress = null;
 const e2eeLabels = {
   initializing: "Đang chuẩn bị chat...", ready: "Đã mã hóa đầu cuối.",
   error: "Chưa thể mở cuộc trò chuyện. Vui lòng đăng nhập lại.",
@@ -210,17 +228,31 @@ function updateSendButton() {
   const pending = cache?.pendingSend;
   const encrypted = cache?.summary?.kind === "direct";
   const allowed = encrypted ? canSendE2EE(cache) : canSendPlaintext(cache);
+  const busy = Boolean(pending?.inFlight) || Boolean(cache?.e2eeSending);
+  const recording = ["requesting", "recording", "stopping", "cancelling"].includes(voiceState);
+  const hasVoice = Boolean(voiceDraft);
+  const hasTextOrFile = Boolean(contentInput.value.trim() || selectedAttachmentFile);
   sendButton.textContent = !encrypted && pending ? "Gửi lại" : "Gửi";
-  sendButton.disabled = !allowed || Boolean(pending?.inFlight) || Boolean(cache?.e2eeSending);
-  contentInput.disabled = !allowed || Boolean(cache?.e2eeSending);
+  sendButton.hidden = !hasTextOrFile || recording || hasVoice;
+  sendButton.disabled = !allowed || busy;
+  voiceRecordButton.hidden = hasTextOrFile || recording || hasVoice;
+  voiceRecordButton.disabled = !allowed || busy || !encrypted;
+  voiceRecordButton.title = encrypted ? "Ghi âm tin nhắn thoại" : "Tin nhắn thoại E2EE hiện chỉ hỗ trợ chat cá nhân";
+  contentInput.disabled = !allowed || busy || recording || hasVoice;
   emojiToggle.disabled = contentInput.disabled;
-  attachmentButton.disabled = !allowed || Boolean(cache?.e2eeSending);
+  attachmentButton.disabled = !allowed || busy || recording || hasVoice;
   attachmentButton.title = cache?.summary?.kind === "group"
     ? "Tệp E2EE cho nhóm chưa được hỗ trợ" : "Đính kèm tệp (tối đa 20 MiB)";
   if (emojiToggle.disabled) closeEmojiPicker();
   // HTML maxlength counts UTF-16 units; group validation counts Unicode points.
   if (encrypted) contentInput.maxLength = 2000;
   else contentInput.removeAttribute("maxlength");
+  voiceRecording.hidden = !recording;
+  voicePreview.hidden = !hasVoice;
+  voiceCancelButton.disabled = voiceState === "stopping";
+  voiceStopButton.disabled = voiceState !== "recording";
+  voiceDiscardButton.disabled = busy;
+  voiceSendButton.disabled = !allowed || busy || !hasVoice;
 }
 function validGroupContent(content) {
   // Match Go strings.TrimSpace (U+0085 is whitespace, U+FEFF is not).
@@ -264,17 +296,117 @@ async function encryptAttachment(file) {
 function parseAttachmentMessage(value) {
   try {
     const parsed = JSON.parse(value);
-    if (parsed?.version !== 1 || parsed.type !== "attachment" || typeof parsed.text !== "string" ||
+    if (parsed?.version !== 1 || !["attachment", "voice"].includes(parsed.type) || typeof parsed.text !== "string" ||
         !Array.isArray(parsed.attachments) || parsed.attachments.length < 1 || parsed.attachments.length > 5) return null;
+    if (parsed.type === "voice" && (parsed.attachments.length !== 1 || !Number.isSafeInteger(parsed.durationMs) || parsed.durationMs < 0 || parsed.durationMs > 120_000)) return null;
     for (const item of parsed.attachments) {
       if (typeof item?.attachmentId !== "string" || item.algorithm !== "AES-256-GCM" ||
           typeof item.key !== "string" || base64ToBytes(item.key).length !== 32 ||
           typeof item.iv !== "string" || base64ToBytes(item.iv).length !== 12 ||
           typeof item.name !== "string" || typeof item.mimeType !== "string" ||
           !Number.isSafeInteger(item.sizeBytes) || item.sizeBytes <= 0 || item.sizeBytes > maximumAttachmentBytes) return null;
+      if (parsed.type === "voice" && (!item.mimeType.startsWith("audio/") || item.sizeBytes > maximumVoiceBytes)) return null;
     }
     return parsed;
   } catch { return null; }
+}
+function formatDuration(durationMs) {
+  const seconds = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+function clearVoiceDraft() {
+  if (voiceTimer !== null) window.clearInterval(voiceTimer);
+  voiceTimer = null;
+  voicePreviewPlayer.pause();
+  voicePreviewPlayer.removeAttribute("src");
+  voicePreviewPlayer.load();
+  if (voicePreviewURL) URL.revokeObjectURL(voicePreviewURL);
+  voicePreviewURL = null;
+  voiceDraft = null;
+  updateSendButton();
+}
+function displayVoicePreview(recording) {
+  clearVoiceDraft();
+  if (recording.blob.size > maximumVoiceBytes) {
+    showError("Bản ghi âm vượt quá 5 MiB. Hãy ghi âm ngắn hơn rồi thử lại.");
+    return;
+  }
+  const extension = recording.mimeType.includes("mp4") ? "m4a" : recording.mimeType.includes("ogg") ? "ogg" : "webm";
+  voiceDraft = { ...recording, file: new File([recording.blob], `voice-message.${extension}`, { type: recording.mimeType }), prepared: null };
+  voicePreviewURL = URL.createObjectURL(recording.blob);
+  voicePreviewPlayer.src = voicePreviewURL;
+  voicePreviewDuration.textContent = formatDuration(recording.durationMs);
+  if (voicePreviewProgress) voicePreviewProgress.value = "0";
+  showError("");
+  updateSendButton();
+}
+function updateVoiceState(nextState) {
+  voiceState = nextState;
+  if (voiceTimer !== null) window.clearInterval(voiceTimer);
+  voiceTimer = null;
+  if (nextState === "recording") {
+    voiceTimer = window.setInterval(() => {
+      voiceRecordingDuration.textContent = formatDuration(performance.now() - voiceRecorder?.startedAt);
+    }, 250);
+  }
+  if (nextState === "requesting") voiceRecordingDuration.textContent = "00:00";
+  updateSendButton();
+}
+function initializeVoiceRecorder() {
+  enhanceVoiceComposer();
+  if (!window.MiniHermesVoiceRecorder) return;
+  voiceRecorder = new window.MiniHermesVoiceRecorder({
+    onState: updateVoiceState,
+    onReady: displayVoicePreview,
+    onError: (error) => showError(error instanceof Error ? error.message : "Không thể ghi âm."),
+  });
+}
+function voiceIcon(pathData, extra = null) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("aria-hidden", "true"); svg.setAttribute("viewBox", "0 0 24 24");
+  const element = document.createElementNS("http://www.w3.org/2000/svg", extra ? "rect" : "path");
+  if (extra) Object.entries(extra).forEach(([name, value]) => element.setAttribute(name, value));
+  else element.setAttribute("d", pathData);
+  svg.append(element);
+  return svg;
+}
+function enhanceVoiceComposer() {
+  if (voicePreviewPlayButton) return;
+  voiceCancelButton.className = "voice-icon-button voice-cancel";
+  voiceCancelButton.setAttribute("aria-label", "Hủy bản ghi");
+  voiceCancelButton.replaceChildren(voiceIcon("M3 6h18M9 6V4h6v2M7 6l1 15h8l1-15M10 10v7M14 10v7"));
+  voiceStopButton.className = "voice-icon-button voice-stop";
+  voiceStopButton.setAttribute("aria-label", "Dừng ghi âm");
+  voiceStopButton.replaceChildren(voiceIcon("", { x: "7", y: "7", width: "10", height: "10", rx: "1" }));
+  const label = voiceRecording.querySelector("span:not(.voice-recording-dot)");
+  if (label) label.className = "voice-recording-label";
+  const wave = document.createElement("span"); wave.className = "voice-wave"; wave.setAttribute("aria-hidden", "true");
+  for (let index = 0; index < 5; index += 1) wave.append(document.createElement("i"));
+  voiceRecordingDuration.before(wave);
+  voiceDiscardButton.className = "voice-icon-button voice-cancel";
+  voiceDiscardButton.setAttribute("aria-label", "Xóa bản ghi");
+  voiceDiscardButton.replaceChildren(voiceIcon("M3 6h18M9 6V4h6v2M7 6l1 15h8l1-15M10 10v7M14 10v7"));
+  voicePreviewPlayer.controls = false;
+  voicePreviewPlayButton = document.createElement("button");
+  voicePreviewPlayButton.type = "button"; voicePreviewPlayButton.className = "voice-icon-button voice-play";
+  voicePreviewPlayButton.setAttribute("aria-label", "Phát bản ghi"); voicePreviewPlayButton.append(voiceIcon("m9 6 9 6-9 6Z"));
+  voicePreviewProgress = document.createElement("input");
+  voicePreviewProgress.className = "voice-progress"; voicePreviewProgress.type = "range"; voicePreviewProgress.min = "0"; voicePreviewProgress.max = "1000"; voicePreviewProgress.value = "0"; voicePreviewProgress.setAttribute("aria-label", "Tiến trình bản ghi");
+  voicePreviewPlayer.after(voicePreviewPlayButton, voicePreviewProgress);
+  voicePreviewPlayButton.addEventListener("click", () => {
+    if (voicePreviewPlayer.paused) void voicePreviewPlayer.play(); else voicePreviewPlayer.pause();
+  });
+  voicePreviewPlayer.addEventListener("play", () => { voicePreviewPlayButton.replaceChildren(voiceIcon("M8 6v12M16 6v12")); voicePreviewPlayButton.setAttribute("aria-label", "Dừng nghe bản ghi"); });
+  voicePreviewPlayer.addEventListener("pause", () => { voicePreviewPlayButton.replaceChildren(voiceIcon("m9 6 9 6-9 6Z")); voicePreviewPlayButton.setAttribute("aria-label", "Phát bản ghi"); });
+  voicePreviewPlayer.addEventListener("timeupdate", () => {
+    if (Number.isFinite(voicePreviewPlayer.duration) && voicePreviewPlayer.duration > 0) {
+      voicePreviewProgress.value = String(Math.round(voicePreviewPlayer.currentTime / voicePreviewPlayer.duration * 1000));
+      voicePreviewDuration.textContent = `${formatDuration(voicePreviewPlayer.currentTime * 1000)} / ${formatDuration(voicePreviewPlayer.duration * 1000)}`;
+    }
+  });
+  voicePreviewProgress.addEventListener("input", () => {
+    if (Number.isFinite(voicePreviewPlayer.duration)) voicePreviewPlayer.currentTime = Number(voicePreviewProgress.value) / 1000 * voicePreviewPlayer.duration;
+  });
 }
 function clearSelectedAttachment() {
   selectedAttachmentFile = null;
@@ -369,6 +501,8 @@ async function sendMessageWithRetry(snapshot, messageID, content) {
 function resetConversation() {
   revokeAttachmentURLs();
   clearSelectedAttachment();
+  if (voiceRecorder && voiceState !== "idle") voiceRecorder.cancel();
+  clearVoiceDraft();
   state.threadID = "";
   state.currentCache = null;
   state.conversationVersion += 1;
@@ -388,6 +522,8 @@ function resetConversation() {
   loadOlderButton.hidden = true;
 }
 function clearSession() {
+  if (voiceRecorder && voiceState !== "idle") voiceRecorder.cancel();
+  clearVoiceDraft();
   const previousE2EE = state.e2ee;
   state.e2ee = null;
   if (previousE2EE) void previousE2EE.close();
@@ -918,6 +1054,53 @@ function attachmentCard(descriptor) {
   return button;
 }
 
+function voiceMessageCard(descriptor, durationMs) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "voice-message";
+  const audio = document.createElement("audio");
+  audio.preload = "none";
+  const play = document.createElement("button"); play.type = "button"; play.className = "voice-icon-button voice-play";
+  play.setAttribute("aria-label", "Phát tin nhắn thoại"); play.append(voiceIcon("m9 6 9 6-9 6Z"));
+  const progress = document.createElement("input"); progress.className = "voice-progress"; progress.type = "range"; progress.min = "0"; progress.max = "1000"; progress.value = "0"; progress.setAttribute("aria-label", "Tiến trình tin nhắn thoại");
+  const label = document.createElement("small");
+  label.textContent = formatDuration(durationMs);
+  const speed = document.createElement("button"); speed.type = "button"; speed.className = "voice-speed"; speed.textContent = "1×"; speed.setAttribute("aria-label", "Tốc độ phát 1 lần");
+  wrapper.append(audio, play, progress, label, speed);
+  let loaded = false;
+  const loadAndPlay = async () => {
+    for (const other of document.querySelectorAll(".voice-message audio")) {
+      if (other !== audio) other.pause();
+    }
+    if (loaded) { await audio.play(); return; }
+    label.textContent = "Đang tải…";
+    try {
+      const blob = await downloadAndDecryptAttachment(descriptor);
+      const url = URL.createObjectURL(blob);
+      attachmentObjectURLs.add(url);
+      audio.src = url;
+      loaded = true;
+      label.textContent = formatDuration(durationMs);
+      await audio.play();
+    } catch (error) {
+      label.textContent = "Thử lại";
+      showError(error instanceof Error ? error.message : "Không thể phát tin nhắn thoại.");
+    }
+  };
+  play.addEventListener("click", () => { if (audio.paused) void loadAndPlay(); else audio.pause(); });
+  audio.addEventListener("play", () => { play.replaceChildren(voiceIcon("M8 6v12M16 6v12")); play.setAttribute("aria-label", "Dừng tin nhắn thoại"); });
+  audio.addEventListener("pause", () => { play.replaceChildren(voiceIcon("m9 6 9 6-9 6Z")); play.setAttribute("aria-label", "Phát tin nhắn thoại"); });
+  audio.addEventListener("timeupdate", () => {
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    progress.value = String(Math.round(audio.currentTime / audio.duration * 1000));
+  });
+  progress.addEventListener("input", () => { if (Number.isFinite(audio.duration)) audio.currentTime = Number(progress.value) / 1000 * audio.duration; });
+  speed.addEventListener("click", () => {
+    const next = audio.playbackRate === 1 ? 1.5 : audio.playbackRate === 1.5 ? 2 : 1;
+    audio.playbackRate = next; speed.textContent = `${String(next).replace(".", ",")}×`; speed.setAttribute("aria-label", `Tốc độ phát ${next} lần`);
+  });
+  return wrapper;
+}
+
 function applyRecall(change, render = true) {
   const messageID = change.message_id || change.id;
   const threadID = change.thread_id;
@@ -1049,7 +1232,9 @@ function renderMessages(scrollMode = "preserve") {
         const sender = document.createElement("strong"); sender.className = "message-sender"; sender.textContent = displayName(message.sender_id); item.append(sender);
       }
       item.append(content);
-      if (attachmentMessage) for (const attachment of attachmentMessage.attachments) item.append(attachmentCard(attachment));
+      if (attachmentMessage) for (const attachment of attachmentMessage.attachments) {
+        item.append(attachmentMessage.type === "voice" ? voiceMessageCard(attachment, attachmentMessage.durationMs) : attachmentCard(attachment));
+      }
       item.append(meta);
       if (sent && message.kind === "text" && !recalled) {
         const menu = document.createElement("details"); menu.className = "message-menu";
@@ -1470,9 +1655,11 @@ function renderedReadSequence(snapshot) {
   }
   if (cache.summary.kind === "direct") {
     if (!state.e2ee?.canRead()) return 0;
-    // Every loaded ciphertext before this marker must have decrypted, committed
-    // and rendered. A placeholder/error is never evidence for read progress.
+    // System and recalled messages are already safely rendered as local UI text.
+    // Only a visible direct text ciphertext must finish decrypting before its
+    // sequence can advance the read marker.
     for (const message of cache.messages.values()) {
+      if (message.kind !== "text" || message.recalled_at || cache.recalls.has(message.id)) continue;
       const view = cache.decryptedViews.get(message.id);
       if (message.content_format !== "e2ee_v2" || view?.status !== "ready" || !view.rendered) return 0;
     }
@@ -1549,6 +1736,43 @@ async function sendE2EEFromForm() {
   } catch (error) {
     if (membershipSnapshotMatches(snapshot) && state.currentCache === cache && state.e2ee === client) {
       showError(`${errorMessage(error)} Dùng Gửi lại trong danh sách tin chưa xác nhận.`);
+    }
+  } finally {
+    cache.e2eeSending = false;
+    if (state.e2ee === client) renderE2EEPanel();
+    if (state.currentCache === cache) updateSendButton();
+  }
+}
+
+async function sendVoiceDraft() {
+  const cache = state.currentCache, client = state.e2ee, draft = voiceDraft;
+  if (!draft || !canSendE2EE(cache) || cache.e2eeSending) return;
+  const snapshot = conversationSnapshot();
+  cache.e2eeSending = true;
+  updateSendButton();
+  showError("");
+  try {
+    let prepared = draft.prepared;
+    if (!prepared) {
+      const encrypted = await encryptAttachment(draft.file);
+      const form = new FormData();
+      form.append("file", encrypted.blob, "voice-message.bin");
+      const uploaded = await apiRequest(`/threads/${encodeURIComponent(cache.threadID)}/attachments`, { method: "POST", body: form });
+      encrypted.descriptor.attachmentId = uploaded.attachmentId;
+      const plaintext = JSON.stringify({ version: 1, type: "voice", text: "", durationMs: Math.round(draft.durationMs), attachments: [encrypted.descriptor] });
+      if ([...plaintext].length > 1000) throw new Error("Thông tin tin nhắn thoại quá dài để gửi an toàn.");
+      prepared = { plaintext, attachmentIDs: [uploaded.attachmentId] };
+      draft.prepared = prepared;
+    }
+    const message = await client.send(structuredClone(cache.summary), prepared.plaintext, prepared.attachmentIDs);
+    if (!membershipSnapshotMatches(snapshot) || state.e2ee !== client) return;
+    const accepted = acceptMessage(message);
+    if (!accepted.conflict) updateThreadFromMessage(message);
+    if (voiceDraft === draft) clearVoiceDraft();
+    if (state.currentCache === cache) renderMessages(currentConversationMatches(snapshot) ? "bottom" : "new");
+  } catch (error) {
+    if (membershipSnapshotMatches(snapshot) && state.currentCache === cache && state.e2ee === client) {
+      showError(`${errorMessage(error)} Bản ghi vẫn được giữ để bạn thử gửi lại.`);
     }
   } finally {
     cache.e2eeSending = false;
@@ -2158,6 +2382,7 @@ contentInput.addEventListener("input", () => {
   } else if (errorElement.textContent === groupContentValidationMessage && validGroupContent(contentInput.value)) {
     showError("");
   }
+  updateSendButton();
 });
 contentInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -2215,11 +2440,31 @@ attachmentInput.addEventListener("change", () => {
   attachmentSize.textContent = `${formatBytes(file.size)} · Sẽ mã hóa trước khi tải lên`;
   attachmentDraft.hidden = false;
   showError("");
+  updateSendButton();
   contentInput.focus();
 });
 removeAttachmentButton.addEventListener("click", () => {
   clearSelectedAttachment();
+  updateSendButton();
   contentInput.focus();
+});
+
+voiceRecordButton.addEventListener("click", () => {
+  if (state.currentCache?.summary?.kind !== "direct") {
+    showNotice("Tin nhắn thoại mã hóa đầu cuối hiện chỉ hỗ trợ chat cá nhân.");
+    return;
+  }
+  if (!voiceRecorder) initializeVoiceRecorder();
+  if (!voiceRecorder) { showError("Không thể khởi tạo chức năng ghi âm."); return; }
+  void voiceRecorder.start();
+});
+voiceStopButton.addEventListener("click", () => voiceRecorder?.stop());
+voiceCancelButton.addEventListener("click", () => voiceRecorder?.cancel());
+voiceDiscardButton.addEventListener("click", () => clearVoiceDraft());
+voiceSendButton.addEventListener("click", () => void sendVoiceDraft());
+window.addEventListener("pagehide", () => {
+  if (voiceRecorder && voiceState !== "idle") voiceRecorder.cancel();
+  clearVoiceDraft();
 });
 
 refreshUsersButton.addEventListener("click", async () => {

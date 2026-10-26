@@ -103,6 +103,7 @@ func NewWithCalls(userHandler UserHandler, threadHandler ThreadHandler, messageH
 	router.StaticFile("/call-api.js", "web/call-api.js")
 	router.StaticFile("/call-manager.js", "web/call-manager.js")
 	router.StaticFile("/group-call-manager.js", "web/group-call-manager.js")
+	router.StaticFile("/voice-recorder.js", "web/voice-recorder.js")
 	router.StaticFile("/e2ee-wasm.js", "web/e2ee-wasm.js")
 	router.StaticFile("/e2ee-state.js", "web/e2ee-state.js")
 	router.StaticFile("/e2ee.js", "web/e2ee.js")
