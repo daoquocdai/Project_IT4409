@@ -25,7 +25,6 @@ const groupThreadList = document.querySelector("#group-thread-list");
 const newDirectSection = document.querySelector("#new-direct-section");
 const refreshUsersButton = document.querySelector("#refresh-users-button");
 const peerName = document.querySelector("#peer-name");
-const peerPresence = document.querySelector("#peer-presence");
 const threadStatus = document.querySelector("#thread-status");
 const historyElement = document.querySelector("#history");
 const messageForm = document.querySelector("#message-form");
@@ -437,7 +436,6 @@ function renderThreadHeading() {
   peerName.textContent = thread ? threadTitle(thread) : "Chọn cuộc trò chuyện";
   conversationAvatar.textContent = avatarInitial(threadTitle(thread));
   const group = thread?.kind === "group";
-  renderPeerPresence();
   threadStatus.textContent = group
     ? !cache.active ? "Bạn không còn trong nhóm này."
       : cache.permissionsPending ? "Đang cập nhật nhóm..."
@@ -507,7 +505,6 @@ function resetConversation() {
   clearVoiceDraft();
   state.threadID = "";
   state.currentCache = null;
-  renderPeerPresence();
   state.conversationVersion += 1;
   peerName.textContent = "Chọn cuộc trò chuyện";
   threadStatus.textContent = "";
@@ -1377,7 +1374,6 @@ function stopWebSocket(resetBackoff = true) {
   state.socket = null;
   state.socketConnecting = false;
   state.socketLastActivityAt = 0;
-  invalidatePresence();
   if (resetBackoff) {
     state.reconnectDelay = 1000;
     state.socketSummaryStale = false;
@@ -1523,7 +1519,6 @@ async function connectWebSocket() {
   if (!state.token || state.socket || state.socketConnecting) {
     return;
   }
-  invalidatePresence();
   const sessionVersion = state.sessionVersion;
   const token = state.token;
   const generation = state.socketGeneration;
@@ -1598,7 +1593,6 @@ async function connectWebSocket() {
       state.socket = null;
       state.socketConnecting = false;
       state.socketSummaryStale = true;
-      invalidatePresence();
       scheduleReconnect(generation, sessionVersion, token);
     };
   } catch (error) {
@@ -1949,7 +1943,6 @@ function renderMembers(cache) {
     const item = document.createElement("li");
     const label = document.createElement("span");
     label.textContent = `${member.username} · ${member.role === "admin" ? "Quản trị viên" : "Thành viên"}`;
-    label.append(createPresenceLabel(member.id));
     item.append(label);
     if (admin && member.id !== state.currentUserID) {
       const remove = document.createElement("button");

@@ -27,13 +27,20 @@ services:
 
   migrate:
     image: mini-hermes:local
-    command:
-      - goose
-      - -dir
-      - db/migrations
-      - postgres
-      - postgres://chat:chat@postgres:5432/chat_api?sslmode=disable
-      - up
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        attempt=1
+        until goose -dir db/migrations postgres 'postgres://chat:chat@postgres:5432/chat_api?sslmode=disable' up; do
+          if [ "$$attempt" -ge 12 ]; then
+            echo "Migration failed after $$attempt attempts." >&2
+            exit 1
+          fi
+          echo "PostgreSQL is not ready for migrations; retrying in 2 seconds ($$attempt/12)..." >&2
+          attempt=$$((attempt + 1))
+          sleep 2
+        done
     depends_on:
       postgres:
         condition: service_healthy
